@@ -19,6 +19,9 @@ htmlcov/
 dist/
 build/
 
+# --- Session handoff notes (transient) ---
+HANDOFF.md
+
 # --- Editors / OS ---
 .vscode/
 .idea/
