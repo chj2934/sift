@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -48,6 +49,7 @@ class Settings(BaseSettings):
     h1_api_username: str | None = Field(default=None, alias="H1_API_USERNAME")
     h1_api_token: str | None = Field(default=None, alias="H1_API_TOKEN")
     nvd_api_key: str | None = Field(default=None, alias="NVD_API_KEY")
+    hf_token: str | None = Field(default=None, alias="HF_TOKEN")
 
     def effective_embed_dim(self) -> int:
         if self.embed_dim and self.embed_dim > 0:
@@ -65,4 +67,8 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    s = Settings()
+    # huggingface_hub / fastembed read HF_TOKEN from the process env, not our .env.
+    if s.hf_token and not os.environ.get("HF_TOKEN"):
+        os.environ["HF_TOKEN"] = s.hf_token
+    return s
