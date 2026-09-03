@@ -1,0 +1,26 @@
+# --- Sensitive / local data: NEVER commit ---
+.env
+vault/
+!vault/.gitkeep
+*.lance
+.lancedb/
+data/
+models/
+
+# --- Python ---
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
