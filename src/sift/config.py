@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     # --- retrieval ---
     rerank: bool = Field(default=False, alias="SIFT_RERANK")
     rerank_model: str = Field(default="BAAI/bge-reranker-v2-m3", alias="SIFT_RERANK_MODEL")
+    # Ranking re-weights. 1.0 = full effect, 0.0 = disable that factor.
+    quality_weight: float = Field(default=1.0, alias="SIFT_QUALITY_WEIGHT")
+    recency_weight: float = Field(default=1.0, alias="SIFT_RECENCY_WEIGHT")
+
+    # --- ingestion ---
+    research_feeds: str = Field(default="", alias="SIFT_RESEARCH_FEEDS")  # extra RSS/Atom URLs, comma-sep
 
     # --- external APIs ---
     anthropic_api_key: str | None = Field(default=None, alias="ANTHROPIC_API_KEY")

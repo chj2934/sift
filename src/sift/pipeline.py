@@ -5,6 +5,7 @@ high-level search entrypoint used by both the CLI and the MCP server.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 from sift.config import get_settings
@@ -12,8 +13,16 @@ from sift.index import embed as _embed
 from sift.index.graph import build_link_index, expand
 from sift.index.rerank import get_reranker
 from sift.index.store import ChunkRow, Hit, Store
+from sift.quality import score_note
 from sift.vault.chunk import chunk_markdown
 from sift.vault.notes import Note, iter_notes
+
+
+def _created_ts(note: Note) -> float:
+    d = note.meta.created
+    if not d:
+        return 0.0
+    return datetime(d.year, d.month, d.day, tzinfo=UTC).timestamp()
 
 
 def _passage(title: str, heading: str, text: str) -> str:
@@ -30,6 +39,8 @@ def _rows_for_note(note: Note, vectors: list[list[float]] | None = None) -> list
         passages = [_passage(m.title, c.heading, c.text) for c in chunks]
         vectors = _embed.get_embedder().embed(passages, kind="passage")
     mtime = note.path.stat().st_mtime if note.path and note.path.exists() else 0.0
+    quality = score_note(m, note.body)
+    created_ts = _created_ts(note)
     rows: list[ChunkRow] = []
     for c, vec in zip(chunks, vectors, strict=False):
         rows.append(
@@ -50,6 +61,8 @@ def _rows_for_note(note: Note, vectors: list[list[float]] | None = None) -> list
                 program=m.program or "",
                 path=str(note.path) if note.path else "",
                 mtime=mtime,
+                quality=quality,
+                created_ts=created_ts,
             )
         )
     return rows
@@ -167,11 +180,18 @@ def search(
     k: int = 8,
     filters: dict | None = None,
     expand_links: bool = False,
+    min_quality: int = 0,
 ) -> SearchResult:
     store = Store()
     pool = max(40, k * 5)
     reranker = get_reranker()
-    hits = store.search(query, k=max(k, 20) if reranker else k, filters=filters, pool=pool)
+    hits = store.search(
+        query,
+        k=max(k, 20) if reranker else k,
+        filters=filters,
+        pool=pool,
+        min_quality=min_quality,
+    )
     hits = reranker.rerank(query, hits, top_k=k) if reranker else hits[:k]
 
     linked: list[dict] = []

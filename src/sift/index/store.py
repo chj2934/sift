@@ -9,6 +9,7 @@ LanceDB versions and makes it unit-testable without a GPU or network.
 from __future__ import annotations
 
 import contextlib
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -20,6 +21,28 @@ from sift.index import embed as _embed
 
 TABLE = "notes"
 RRF_K = 60
+_YEAR_SECS = 31_557_600.0
+
+
+def _quality_mult(quality: int) -> float:
+    """Map a 0-100 quality score to a ranking multiplier (~0.6 .. 1.4 at weight 1.0)."""
+    w = get_settings().quality_weight
+    if w <= 0:
+        return 1.0
+    return 1.0 + w * (0.8 * (quality / 100.0) - 0.4)
+
+
+def _recency_mult(created_ts: float) -> float:
+    """Mild boost for recent notes, mild decay for old ones (~0.75 .. 1.15 at weight 1.0).
+
+    Unknown dates (created_ts == 0) are neutral.
+    """
+    w = get_settings().recency_weight
+    if w <= 0 or not created_ts:
+        return 1.0
+    age_years = max(0.0, (time.time() - created_ts) / _YEAR_SECS)
+    delta = max(-0.25, min(0.15, 0.15 - 0.06 * age_years))
+    return 1.0 + w * delta
 
 
 def _schema(dim: int) -> pa.Schema:
@@ -43,6 +66,8 @@ def _schema(dim: int) -> pa.Schema:
             pa.field("program", pa.string()),
             pa.field("path", pa.string()),
             pa.field("mtime", pa.float64()),
+            pa.field("quality", pa.int32()),  # 0-100 heuristic retrieval-worth
+            pa.field("created_ts", pa.float64()),  # note's disclosed/created date, epoch secs (0 = unknown)
         ]
     )
 
@@ -65,6 +90,8 @@ class ChunkRow:
     program: str = ""
     path: str = ""
     mtime: float = 0.0
+    quality: int = 50
+    created_ts: float = 0.0
 
     def to_record(self) -> dict:
         parts = [self.title, self.heading, self.text, " ".join(self.tags), " ".join(self.cwe)]
@@ -87,6 +114,8 @@ class ChunkRow:
             "program": self.program or "",
             "path": self.path,
             "mtime": self.mtime,
+            "quality": int(self.quality),
+            "created_ts": float(self.created_ts),
         }
 
 
@@ -105,6 +134,8 @@ class Hit:
     excerpt: str
     heading: str
     matched_chunks: int
+    quality: int = 0
+    created_ts: float = 0.0
 
 
 class Store:
@@ -231,6 +262,7 @@ class Store:
         k: int = 8,
         filters: dict | None = None,
         pool: int = 40,
+        min_quality: int = 0,
     ) -> list[Hit]:
         where = self._where(filters)
         vec = _embed.get_embedder().embed_query(query)
@@ -269,7 +301,15 @@ class Store:
                 excerpt=(row.get("text", "") or "")[:600],
                 heading=row.get("heading", "") or "",
                 matched_chunks=1,
+                quality=int(row.get("quality") or 0),
+                created_ts=float(row.get("created_ts") or 0.0),
             )
 
-        ranked = sorted(notes.values(), key=lambda h: h.score, reverse=True)
+        results = list(notes.values())
+        if min_quality > 0:
+            results = [h for h in results if h.quality >= min_quality]
+        for h in results:
+            h.score *= _quality_mult(h.quality) * _recency_mult(h.created_ts)
+
+        ranked = sorted(results, key=lambda h: h.score, reverse=True)
         return ranked[:k]

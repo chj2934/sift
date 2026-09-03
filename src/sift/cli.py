@@ -102,12 +102,76 @@ def reindex(force: bool = typer.Option(False, help="Drop and rebuild the whole i
 
 
 @app.command()
+def prune(
+    keep_since: int = typer.Option(2025, help="Keep reports/CVEs created in this year or later."),
+    report_quality_bar: int = typer.Option(
+        62, help="Older reports are kept only if bountied AND scoring at least this."
+    ),
+    yes: bool = typer.Option(False, "--yes", help="Actually delete (default: dry run)."),
+) -> None:
+    """Drop bulk-ingested notes the reasoning model already knows; keep the rest.
+
+    Default is a dry run — shows what would go. Re-run with --yes to delete and reindex.
+    """
+    from collections import Counter
+
+    from sift.prune import classify
+    from sift.vault.notes import iter_notes
+
+    vault = get_settings().resolved_vault()
+    keep: list = []
+    drop: list = []
+    keep_reasons: Counter = Counter()
+    drop_reasons: Counter = Counter()
+
+    for note in iter_notes(vault):
+        v = classify(note, keep_since_year=keep_since, report_quality_bar=report_quality_bar)
+        (keep if v.keep else drop).append(note)
+        (keep_reasons if v.keep else drop_reasons)[v.reason] += 1
+
+    t = Table(title=f"prune plan  (keep_since={keep_since})")
+    t.add_column("action")
+    t.add_column("reason")
+    t.add_column("notes", justify="right")
+    for r, n in keep_reasons.most_common():
+        t.add_row("[green]keep", r, str(n))
+    for r, n in drop_reasons.most_common():
+        t.add_row("[red]drop", r, str(n))
+    t.add_row("[bold]total", "", f"[bold]{len(keep) + len(drop)}")
+    console.print(t)
+    console.print(f"[green]keep {len(keep)}[/]   [red]drop {len(drop)}[/]")
+
+    if drop:
+        console.print("\n[dim]sample drops:[/]")
+        for note in drop[:10]:
+            console.print(f"  [dim]{note.meta.type}[/] {note.meta.title[:80]}")
+
+    if not yes:
+        console.print("\n[yellow]dry run[/] — re-run with [bold]--yes[/] to delete and reindex.")
+        return
+
+    removed = 0
+    for note in drop:
+        if note.path and note.path.exists():
+            note.path.unlink()
+            removed += 1
+    console.print(f"[red]deleted {removed} notes[/]. Rebuilding index…")
+    from sift.pipeline import reindex as _reindex
+
+    stats = _reindex(force=True)
+    console.print(f"[green]done[/] {stats.notes} notes, {stats.chunks} chunks")
+
+
+@app.command()
 def search(
     query: str,
     k: int = typer.Option(8, "-k", help="Number of notes to return."),
     type: str | None = typer.Option(None, help="Filter by note type."),
     cwe: str | None = typer.Option(None, help="Filter by CWE, e.g. CWE-79."),
     program: str | None = typer.Option(None, help="Filter by program/vendor."),
+    min_quality: int = typer.Option(
+        0, "--min-quality", help="Drop hits below this 0-100 quality score."
+    ),
     links: bool = typer.Option(False, "--links", help="Also show 1-hop linked notes."),
     full: bool = typer.Option(False, "--full", help="Print full excerpts."),
 ) -> None:
@@ -115,7 +179,9 @@ def search(
     from sift.pipeline import search as _search
 
     filters = {k2: v for k2, v in {"type": type, "cwe": cwe, "program": program}.items() if v}
-    result = _search(query, k=k, filters=filters or None, expand_links=links)
+    result = _search(
+        query, k=k, filters=filters or None, expand_links=links, min_quality=min_quality
+    )
 
     if not result.hits:
         console.print("[yellow]no matches[/] — is the index built? try `sift reindex`")
@@ -129,6 +195,7 @@ def search(
             for x in [
                 h.severity and f"sev:{h.severity}",
                 h.program and f"@{h.program}",
+                f"q:{h.quality}",
                 f"score {h.score:.3f}",
             ]
             if x
@@ -234,6 +301,24 @@ def ingest_h1_mine(
     if hacktivity:
         res2 = run_source("h1-hacktivity", hacktivity_source(query=query, limit=limit))
         console.print(f"[green]h1-hacktivity[/]: {res2.written} notes, {res2.errors} errors")
+
+
+@ingest_app.command("research")
+def ingest_research(
+    fetch_body: bool = typer.Option(
+        False, "--fetch-body", help="Also fetch each article page for full text (slower)."
+    ),
+    limit: int = typer.Option(0, help="Max new items (0 = all)."),
+) -> None:
+    """Recent security research from RSS feeds (PortSwigger + SIFT_RESEARCH_FEEDS)."""
+    from sift.ingest.base import run_source
+    from sift.ingest.research import source
+
+    res = run_source("research", source(limit=limit or None, fetch_body=fetch_body))
+    console.print(
+        f"[green]research[/]: {res.written} new notes, {res.indexed_chunks} chunks, "
+        f"{res.errors} errors"
+    )
 
 
 @ingest_app.command("notes")

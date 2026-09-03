@@ -35,6 +35,7 @@ def search_memory(
     type: str | None = None,
     cwe: str | None = None,
     program: str | None = None,
+    min_quality: int = 0,
     expand_links: bool = False,
 ) -> dict:
     """Hybrid (semantic + keyword) search over the memory vault.
@@ -45,10 +46,13 @@ def search_memory(
         type: optional filter — one of report, cve, technique, target, finding, writeup.
         cwe: optional CWE filter, e.g. "CWE-79".
         program: optional bug bounty program / vendor filter.
+        min_quality: drop hits below this 0-100 heuristic quality score (default 0 = off).
         expand_links: also return notes linked (1 hop) from the top hits.
     """
     filters = {k2: v for k2, v in {"type": type, "cwe": cwe, "program": program}.items() if v}
-    res = _search(query, k=k, filters=filters or None, expand_links=expand_links)
+    res = _search(
+        query, k=k, filters=filters or None, expand_links=expand_links, min_quality=min_quality
+    )
     return {
         "query": query,
         "results": [
@@ -59,6 +63,7 @@ def search_memory(
                 "severity": h.severity or None,
                 "program": h.program or None,
                 "url": h.url or None,
+                "quality": h.quality,
                 "score": round(h.score, 4),
                 "matched_section": h.heading or None,
                 "excerpt": h.excerpt,

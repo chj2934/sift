@@ -124,7 +124,13 @@ def test_search_link_expansion(vault_path):
             "r1",
             "report",
             "Stored XSS via SVG upload",
-            "Stored cross site scripting through SVG avatar upload. See [[svg-upload-xss-bypass]].",
+            "## Summary\nStored cross site scripting through SVG avatar upload. See "
+            "[[svg-upload-xss-bypass]].\n\n## Steps to reproduce\n1. Upload a crafted SVG "
+            "avatar containing an onload handler.\n2. View another user's profile; the "
+            "script executes in the app origin.\n\n```\nGET /avatars/evil.svg HTTP/1.1\n```\n\n"
+            "## Impact\nAccount takeover via session theft.",
+            severity="high",
+            extra={"has_bounty": True, "vote_count": 12},
         ),
     )
     save_note(
@@ -141,3 +147,30 @@ def test_search_link_expansion(vault_path):
     res = search("svg avatar upload scripting", k=1, expand_links=True)
     assert res.hits[0].note_id == "r1"
     assert any(nb["slug"] == "svg-upload-xss-bypass" for nb in res.linked)
+
+
+def test_quality_reweights_ranking(vault_path):
+    from sift.pipeline import reindex, search
+    from sift.vault.notes import save_note
+
+    body = (
+        "## Summary\nCache poisoning via the X-Forwarded-Host header on the login page.\n\n"
+        "## Steps to reproduce\n1. Send a request with `X-Forwarded-Host: evil.com`.\n"
+        "2. The response caches an absolute redirect to evil.com.\n\n"
+        "```\nGET / HTTP/1.1\nX-Forwarded-Host: evil.com\n```\n\n## Impact\nStored redirect / XSS.\n"
+    )
+    # Same text; one is a marked dupe with no bounty, the other bountied + well-voted.
+    save_note(vault_path, _make_note("weak", "report", "Cache poisoning via XFH", body,
+                                     extra={"is_dupe": True}))
+    save_note(vault_path, _make_note("strong", "report", "Cache poisoning via XFH", body,
+                                     severity="high",
+                                     extra={"has_bounty": True, "vote_count": 25}))
+    reindex(force=True)
+
+    res = search("cache poisoning x-forwarded-host redirect", k=2)
+    assert [h.note_id for h in res.hits][0] == "strong"
+    assert res.hits[0].quality > res.hits[1].quality
+
+    # min_quality filter drops the weak one entirely
+    res2 = search("cache poisoning x-forwarded-host redirect", k=5, min_quality=55)
+    assert [h.note_id for h in res2.hits] == ["strong"]
