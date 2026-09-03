@@ -1,5 +1,7 @@
 # sift
 
+[![CI](https://github.com/chj2934/sift/actions/workflows/ci.yml/badge.svg)](https://github.com/chj2934/sift/actions/workflows/ci.yml)
+
 Obsidian-like vector memory for bug bounty hunting. A personal knowledge base of
 disclosed reports, CVEs, attack techniques, target notes and your own findings —
 stored as plain markdown, searchable semantically, and exposed to Claude Code as
