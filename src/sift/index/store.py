@@ -317,6 +317,27 @@ class Hit:
     matched_chunks: int
     quality: int = 0
     created_ts: float = 0.0
+    #: Indices (into the searched phrasings) of the queries that found this note.
+    matched_queries: list[int] = field(default_factory=list)
+
+
+#: Upper bound on phrasings per multi-query search: each one costs a vector and a
+#: keyword search, and past a handful they stop adding new notes.
+MAX_QUERIES = 6
+
+
+def normalize_queries(query: str | None, queries: Iterable[str] | None = None) -> list[str]:
+    """`query` followed by `queries`, stripped, blanks dropped, and repeats removed
+    case-insensitively (the first spelling wins). Order is preserved: index 0 is the
+    primary phrasing, which the reranker scores against."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for q in [query, *(queries or [])]:
+        q = (q or "").strip()
+        if q and q.casefold() not in seen:
+            seen.add(q.casefold())
+            out.append(q)
+    return out
 
 
 class Store:
@@ -873,10 +894,20 @@ class Store:
 
     @staticmethod
     def _fuse(vhits: list[dict], fhits: list[dict], min_quality: int) -> list[Hit]:
-        # Reciprocal Rank Fusion over chunk ids.
+        """Fuse one phrasing's vector and keyword lists."""
+        return Store._fuse_many([(0, vhits), (0, fhits)], min_quality)
+
+    @staticmethod
+    def _fuse_many(lists: list[tuple[int, list[dict]]], min_quality: int) -> list[Hit]:
+        """Reciprocal Rank Fusion over chunk ids across every ranked list.
+
+        Each phrasing contributes two lists (vector, keyword) tagged with its index, so a
+        chunk found by several phrasings collects several RRF terms and rises - the point
+        of searching more than one phrasing.
+        """
         scores: dict[str, float] = {}
         chunk_by_id: dict[str, dict] = {}
-        for hits in (vhits, fhits):
+        for _qi, hits in lists:
             seen: set[str] = set()
             for rank, row in enumerate(hits):
                 cid = row["id"]
@@ -927,9 +958,42 @@ class Store:
             h.score *= _quality_mult(h.quality) * _recency_mult(h.created_ts)
         return results
 
+    @staticmethod
+    def _attribute(
+        hits: list[Hit], lists: list[tuple[int, list[dict]]], n: int, k: int, min_quality: int
+    ) -> None:
+        """Set each hit's ``matched_queries``: the phrasings that would have returned it
+        in their own top ``k``.
+
+        Not "appeared in the candidate pool": every vector search returns its nearest
+        rows whatever they are, so pool membership is true of nearly every hit and says
+        nothing. Each phrasing is ranked with the same fusion and weighting as the
+        combined search, so a single phrasing attributes every hit to itself.
+        """
+        if n == 1:
+            for h in hits:
+                h.matched_queries = [0]
+            return
+        top: list[set[str]] = []
+        for qi in range(n):
+            own = Store._fuse_many([lst for lst in lists if lst[0] == qi], min_quality)
+            own.sort(key=lambda h: h.score, reverse=True)
+            top.append({h.note_id for h in own[:k]})
+        for h in hits:
+            h.matched_queries = [qi for qi in range(n) if h.note_id in top[qi]]
+
+    def _retrieve_all(
+        self, tbl, vecs: list[list[float]], queries: list[str], pool: int, where: str | None
+    ) -> list[tuple[int, list[dict]]]:
+        lists: list[tuple[int, list[dict]]] = []
+        for qi, (q, vec) in enumerate(zip(queries, vecs, strict=True)):
+            vhits, fhits = self._retrieve(tbl, vec, q, pool, where)
+            lists += [(qi, vhits), (qi, fhits)]
+        return lists
+
     def search(
         self,
-        query: str,
+        query: str | list[str],
         *,
         k: int = 8,
         filters: dict | None = None,
@@ -938,8 +1002,16 @@ class Store:
     ) -> list[Hit]:
         """Hybrid search. Raises ValueError for a malformed filter, IndexDimMismatch
         when the index was built with another model, and RuntimeError when the vector
-        search fails; a failed keyword search only adds to ``self.warnings``."""
+        search fails; a failed keyword search only adds to ``self.warnings``.
+
+        ``query`` may be a list of phrasings: all are embedded in one batch, each runs
+        its own vector and keyword search, and every list is fused by RRF into one
+        ranking. Each hit's ``matched_queries`` says which phrasings found it.
+        """
         self.warnings = []
+        queries = normalize_queries(None, [query] if isinstance(query, str) else query)
+        if not queries:
+            return []
         where = self._where(filters)
         if min_quality > 0:
             # In the query, not after it: as a post-filter over a fixed 40-chunk pool,
@@ -952,9 +1024,13 @@ class Store:
         if tbl is None:
             return []
         self._check_dim(tbl)
-        vec = _embed.get_embedder().embed_query(query)
+        emb = _embed.get_embedder()
+        # One phrasing keeps the single-query path; several are embedded in one batch.
+        vecs = (
+            [emb.embed_query(queries[0])] if len(queries) == 1 else emb.embed(queries, kind="query")
+        )
         try:
-            vhits, fhits = self._retrieve(tbl, vec, query, pool, where)
+            lists = self._retrieve_all(tbl, vecs, queries, pool, where)
         except IndexDimMismatch:
             raise
         except Exception:
@@ -965,16 +1041,17 @@ class Store:
             tbl = self._existing_table()
             if tbl is None:
                 return []
-            vhits, fhits = self._retrieve(tbl, vec, query, pool, where)
+            lists = self._retrieve_all(tbl, vecs, queries, pool, where)
 
-        results = self._fuse(vhits, fhits, min_quality)
-        if len(results) < k and pool < _MAX_POOL and (len(vhits) >= pool or len(fhits) >= pool):
+        results = self._fuse_many(lists, min_quality)
+        if len(results) < k and pool < _MAX_POOL and any(len(h) >= pool for _, h in lists):
             # A full pool that collapsed to fewer than k notes: a few notes' chunks
-            # crowded it. Widen once, reusing the query vector.
+            # crowded it. Widen once, reusing the query vectors.
             wide = min(pool * 3, _MAX_POOL)
-            vhits, fhits = self._retrieve(tbl, vec, query, wide, where)
-            results = self._fuse(vhits, fhits, min_quality)
+            lists = self._retrieve_all(tbl, vecs, queries, wide, where)
+            results = self._fuse_many(lists, min_quality)
         self.warnings = list(dict.fromkeys(self.warnings))
 
-        ranked = sorted(results, key=lambda h: h.score, reverse=True)
-        return ranked[:k]
+        ranked = sorted(results, key=lambda h: h.score, reverse=True)[:k]
+        self._attribute(ranked, lists, len(queries), k, min_quality)
+        return ranked

@@ -41,7 +41,7 @@ from sift.config import get_settings
 from sift.index import embed as _embed
 from sift.index.graph import build_link_index, expand_records
 from sift.index.rerank import get_reranker
-from sift.index.store import ChunkRow, Hit, Store, norm_path
+from sift.index.store import ChunkRow, Hit, Store, norm_path, normalize_queries
 from sift.quality import is_user_authored, score_note
 from sift.vault.chunk import CHUNKER_VERSION, DEFAULT_SPECIAL_TOKENS, Chunk, chunk_markdown
 from sift.vault.notes import (
@@ -851,7 +851,7 @@ def _linked(hits: list[Hit], warnings: list[str]) -> list[dict]:
 
 
 def search(
-    query: str,
+    query: str | list[str],
     *,
     k: int = 8,
     filters: dict | None = None,
@@ -860,14 +860,18 @@ def search(
 ) -> SearchResult:
     """Hybrid search. Raises ValueError for a malformed filter, IndexDimMismatch (a
     RuntimeError) when the index was built with another model, and RuntimeError when
-    vector search fails; a degraded keyword search is reported in `warnings`."""
+    vector search fails; a degraded keyword search is reported in `warnings`.
+
+    ``query`` may be a list of phrasings, fused into one ranking (see `Store.search`).
+    The reranker, when enabled, scores against the first (primary) phrasing."""
     store = Store()
     reranker = get_reranker()
     want = max(k, 20) if reranker else k
     pool = min(_MAX_POOL, max(_MIN_POOL, want * 10))
     hits = store.search(query, k=want, filters=filters, pool=pool, min_quality=min_quality)
     warnings = list(store.warnings)
-    hits = reranker.rerank(query, hits, top_k=k) if reranker else hits[:k]
+    primary = query if isinstance(query, str) else (normalize_queries(None, query) or [""])[0]
+    hits = reranker.rerank(primary, hits, top_k=k) if reranker else hits[:k]
 
     linked = _linked(hits, warnings) if expand_links and hits else []
     return SearchResult(hits=hits, linked=linked, warnings=list(dict.fromkeys(warnings)))

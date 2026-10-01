@@ -127,10 +127,12 @@ claude mcp list                  # should show "sift"
 
 Then in a Claude Code session these tools are available. Ask things like *"what SVG
 upload XSS bypasses are in my memory?"* or *"remember this technique: …"*.
+[`docs/CLAUDE-GUIDE.md`](docs/CLAUDE-GUIDE.md) is a ready-to-paste section for your own
+prompts that teaches Claude to search and record well.
 
 | tool | what it does |
 |---|---|
-| `search_memory` | hybrid search, with type / CWE / program / quality filters and optional link expansion |
+| `search_memory` | hybrid search; `queries` fuses 2–6 phrasings into one ranking. Type / CWE / program / quality filters, optional link expansion |
 | `get_note` | one note by id, slug or path (optionally one section) |
 | `list_notes` | browse by type, program, status, tag, source or date |
 | `stats` | note counts, index size, last ingests, unreadable files |

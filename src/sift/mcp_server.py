@@ -581,7 +581,8 @@ def _note_with_url(vault: Path, url: str) -> CatalogRow | None:
 
 @mcp.tool(annotations=_READ)
 def search_memory(
-    query: str,
+    query: str = "",
+    queries: list[str] | None = None,
     k: Annotated[int, Field(ge=1, le=50)] = 8,
     type: NoteType | None = None,
     cwe: str | None = None,
@@ -591,8 +592,17 @@ def search_memory(
 ) -> dict:
     """Hybrid (semantic + keyword) search over the memory vault.
 
+    Prefer `queries` with 2-4 phrasings of the same need, searched together and fused
+    into one ranking: (1) the exact identifiers - function, endpoint, parameter, header,
+    CVE id, error string - which the keyword side matches literally; (2) a plain-language
+    description; optionally (3) a sentence written as the note you hope exists. Each
+    hit then lists `matched_queries`: a note found by several phrasings is the strongest
+    match. Use `query` alone for a single exact lookup.
+
     Args:
-        query: natural-language or keyword query.
+        query: one natural-language or keyword query.
+        queries: several phrasings (up to 6), fused into one ranking. Combined with
+            `query` if both are given; blanks and repeats are dropped.
         k: number of notes to return (1-50, default 8).
         type: optional note type filter.
         cwe: optional CWE filter, e.g. "CWE-79" (exact match).
@@ -600,8 +610,16 @@ def search_memory(
         min_quality: drop hits below this 0-100 heuristic quality score (default 0 = off).
         expand_links: also return notes linked (1 hop) from the top hits.
     """
-    if not (query or "").strip():
-        raise ToolError("query is empty")
+    from sift.index.store import MAX_QUERIES, normalize_queries
+
+    phrasings = normalize_queries(query, queries)
+    if not phrasings:
+        raise ToolError("query is empty: pass `query` or a non-empty `queries` list")
+    if len(phrasings) > MAX_QUERIES:
+        raise ToolError(
+            f"at most {MAX_QUERIES} queries per call (got {len(phrasings)}); "
+            "keep the 2-4 phrasings that differ most"
+        )
     _check_range("k", k, 1, 50)
     _check_range("min_quality", min_quality, 0, 100)
     _check_type(type)
@@ -609,37 +627,49 @@ def search_memory(
 
     from sift.pipeline import search
 
+    multi = len(phrasings) > 1
     filters = {k2: v for k2, v in {"type": type, "cwe": cwe, "program": program}.items() if v}
     try:
         res = search(
-            query, k=k, filters=filters or None, expand_links=expand_links, min_quality=min_quality
+            phrasings if multi else phrasings[0],
+            k=k,
+            filters=filters or None,
+            expand_links=expand_links,
+            min_quality=min_quality,
         )
     except (ValueError, RuntimeError) as exc:  # bad filter, model/index mismatch, failed search
         raise ToolError(str(exc)) from exc
-    return {
-        "query": query,
-        "results": [
-            {
-                "note_id": h.note_id,
-                "slug": h.slug,
-                "title": h.title,
-                "type": h.type,
-                "severity": h.severity or None,
-                "program": h.program or None,
-                "url": h.url or None,
-                "created": _created_of_ts(h.created_ts),
-                "quality": h.quality,
-                "score": round(h.score, 4),
-                "matched_section": h.heading or None,
-                "excerpt": h.excerpt,
-                "path": h.path,
-            }
-            for h in res.hits
-        ],
-        "linked": res.linked,
-        "warnings": list(res.warnings),
-        "hint": "call get_note(note_id) for the full note",
-    }
+
+    def _row(h) -> dict:
+        row = {
+            "note_id": h.note_id,
+            "slug": h.slug,
+            "title": h.title,
+            "type": h.type,
+            "severity": h.severity or None,
+            "program": h.program or None,
+            "url": h.url or None,
+            "created": _created_of_ts(h.created_ts),
+            "quality": h.quality,
+            "score": round(h.score, 4),
+            "matched_section": h.heading or None,
+            "excerpt": h.excerpt,
+            "path": h.path,
+        }
+        if multi:
+            row["matched_queries"] = list(h.matched_queries)
+        return row
+
+    out: dict = {"queries": phrasings} if multi else {"query": phrasings[0]}
+    out.update(
+        {
+            "results": [_row(h) for h in res.hits],
+            "linked": res.linked,
+            "warnings": list(res.warnings),
+            "hint": "call get_note(note_id) for the full note",
+        }
+    )
+    return out
 
 
 @mcp.tool(annotations=_READ)

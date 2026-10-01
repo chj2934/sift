@@ -28,6 +28,8 @@ scoring change), `sift compact` (index compaction), `sift prune`, `sift trash`.
 **Search sift before answering questions about a target, a technique, or a past
 finding.** `search_memory` covers disclosed reports, CVEs, distilled techniques, and
 the user's own notes. `search_memory(min_quality=70)` filters to high-quality hits.
+Pass 2–4 phrasings in `queries` (exact identifiers, a plain description, a sentence
+written as the note you hope exists) — the full how-to is `docs/CLAUDE-GUIDE.md`.
 
 **When you form a novel testing idea, call `capture_idea` before testing it.** Not for
 routine methodology — for the specialized, non-obvious hypotheses that are worth
