@@ -138,6 +138,41 @@ def test_no_feed_candidates_for_unknown_shape():
     assert feed_urls_for("https://medium.com/") == []
 
 
+def test_a_cached_feed_is_downloaded_once_per_run():
+    """N posts from one author used to cost N feed downloads (plus N guaranteed 403s)."""
+    from sift.ingest.medium import feed_lookup
+
+    body = _FEED.format(other="other article " * 60, target="the real technique " * 60)
+    client = _FeedClient(body)
+    cache: dict = {}
+
+    first, fetched1 = feed_lookup(client, "https://medium.com/@a/target-59152daaf413", cache)
+    second, fetched2 = feed_lookup(client, "https://medium.com/@a/other-111111111111", cache)
+
+    assert "the real technique" in first.text and "other article" in second.text
+    assert first.title == "Target post"
+    assert (fetched1, fetched2) == (True, False)
+    assert client.requested == ["https://medium.com/feed/@a"]
+
+
+def test_a_failed_feed_is_remembered_in_the_cache():
+    from sift.ingest.medium import fetch_via_feed
+
+    client = _FeedClient("", status=403)
+    cache: dict = {}
+    for n in range(3):
+        assert fetch_via_feed(client, f"https://medium.com/@a/p{n}-59152daaf41{n}", cache) == ""
+    assert client.requested == ["https://medium.com/feed/@a"]
+
+
+def test_unparseable_links_are_not_medium_and_do_not_raise():
+    from sift.ingest.medium import feed_urls_for, is_medium, post_id
+
+    assert not is_medium("http://[::1/x")
+    assert post_id("http://[::1/x") is None
+    assert feed_urls_for("http://[::1/x") == []
+
+
 def test_labels_json_fixture_still_parses():
     """Guards the eval set against an accidental rewrite."""
     from sift.config import PROJECT_ROOT

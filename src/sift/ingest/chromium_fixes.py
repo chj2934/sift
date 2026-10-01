@@ -20,6 +20,7 @@ measured on a real checkout, the filter keeps ~1.6% of commits in those paths.
 from __future__ import annotations
 
 import contextlib
+import logging
 import re
 import subprocess
 from collections.abc import Iterator
@@ -31,6 +32,8 @@ from sift.config import get_settings
 from sift.ingest.base import clean_text
 from sift.vault.notes import Note
 from sift.vault.schema import Frontmatter
+
+log = logging.getLogger(__name__)
 
 # Where a compromised renderer's messages actually land. Excluding third_party/ is
 # deliberate: its fixes are overwhelmingly fuzzer-found memory bugs in parsers, which
@@ -277,7 +280,7 @@ def fetch_log(src: Path, since: date, paths: tuple[str, ...]) -> str:
             check=True,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        print(f"  ! chromium-fixes: git log failed: {exc}")
+        log.warning("chromium-fixes: git log failed: %s", exc)
         return ""
     return out.stdout
 
@@ -288,12 +291,17 @@ def source(
     paths: tuple[str, ...] = DEFAULT_PATHS,
     classes: tuple[str, ...] = (),
     limit: int | None = None,
+    refresh: bool = False,
 ) -> Iterator[Note]:
     """Security-relevant commits since ``since`` (default: the model cutoff).
 
     ``classes`` narrows to named mechanism families (see `CLASS_PATTERNS`); empty
-    means all four.
+    means all four. A commit already in the vault is not yielded again unless
+    ``refresh`` - its sha never changes, and the set since the cutoff only grows, so
+    every run used to rewrite and re-embed all of it. ``limit`` counts new notes.
     """
+    from sift.ingest.existing import stored_ids
+
     settings = get_settings()
     src = _resolved_src()
     horizon = since or settings.model_cutoff
@@ -303,15 +311,23 @@ def source(
     if not raw:
         return
 
+    have = set() if refresh else stored_ids(settings.resolved_vault(), prefix="chromium-fix-")
     seen = 0
     scanned = 0
+    known = 0
     for commit in parse_log(raw):
         scanned += 1
         matched = classify(commit.subject)
         if not matched or (wanted and not wanted.intersection(matched)):
             continue
+        if f"chromium-fix-{commit.sha[:12]}" in have:
+            known += 1
+            continue
         yield to_note(commit, matched)
         seen += 1
         if limit and seen >= limit:
             break
-    print(f"  .. chromium-fixes: {seen} security-relevant of {scanned} commits since {horizon}")
+    log.info(
+        "chromium-fixes: %d new security-relevant commits (%d already stored) of %d since %s",
+        seen, known, scanned, horizon,
+    )  # fmt: skip

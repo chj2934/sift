@@ -22,6 +22,10 @@ htmlcov/
 dist/
 build/
 
+# --- distill working files: article excerpts and private vault paths (the repo is public) ---
+/candidates*.jsonl
+/verdicts*.jsonl
+
 # --- Session handoff notes (transient) ---
 HANDOFF.md
 

@@ -19,13 +19,10 @@ is a title (tens of tokens) rather than an article.
 
 from __future__ import annotations
 
-import json
-
 from pydantic import BaseModel, Field
 
-from sift.config import get_settings
 from sift.distill.candidates import Candidate
-from sift.distill.gate import GateError, Verdict, _client
+from sift.distill.gate import GateError, Verdict, _client, _create_json
 
 # Stage 1 sees NO article text. An earlier version passed the opening 300 characters
 # for context, but research posts routinely state their technique in the first
@@ -120,26 +117,8 @@ _SCORE_SCHEMA = {
 _REASON = {"partial": "obscure-variant", "missed": "post-cutoff"}
 
 
-def _call(client, model: str, effort: str, system: str, user: str, schema: dict) -> dict:
-    resp = client.messages.create(
-        model=model,
-        max_tokens=4000,
-        system=system,
-        messages=[{"role": "user", "content": user}],
-        output_config={"effort": effort, "format": {"type": "json_schema", "schema": schema}},
-    )
-    if resp.stop_reason == "refusal":
-        raise GateError("model refused")
-    try:
-        text = next(b.text for b in resp.content if b.type == "text")
-        return json.loads(text)
-    except (StopIteration, json.JSONDecodeError) as exc:
-        raise GateError(f"unusable response: {exc}") from exc
-
-
 def predict(candidate: Candidate, *, client=None) -> Prediction:
     """Stage 1 - explain the technique from the title alone."""
-    s = get_settings()
     client = client or _client()
     published = candidate.created.isoformat() if candidate.created else "unknown"
     user = (
@@ -148,12 +127,21 @@ def predict(candidate: Candidate, *, client=None) -> Prediction:
         f"Published: {published}\n\n"
         "Explain this technique from memory. You have not been shown the article."
     )
-    return Prediction(**_call(client, s.gate_model, s.gate_effort, PREDICT_SYSTEM, user, _PREDICT_SCHEMA))
+    data = _create_json(
+        client,
+        system=PREDICT_SYSTEM,
+        user=user,
+        schema=_PREDICT_SCHEMA,
+        label=f"predict {candidate.title!r}",
+    )
+    try:
+        return Prediction(**data)
+    except (TypeError, ValueError) as exc:  # pydantic's ValidationError is a ValueError
+        raise GateError(f"unusable prediction for {candidate.title!r}: {exc}") from exc
 
 
 def judge_behavioral(candidate: Candidate, *, client=None) -> Verdict:
     """Two-stage behavioural gate. Returns the same Verdict shape as `gate.judge`."""
-    s = get_settings()
     client = client or _client()
 
     p = predict(candidate, client=client)
@@ -165,10 +153,26 @@ def judge_behavioral(candidate: Candidate, *, client=None) -> Verdict:
         f"# The actual article\n"
         f"Title: {candidate.title}\n\n{candidate.gate_text()}"
     )
-    scored = _call(client, s.gate_model, s.gate_effort, SCORE_SYSTEM, user, _SCORE_SCHEMA)
+    scored = _create_json(
+        client,
+        system=SCORE_SYSTEM,
+        user=user,
+        schema=_SCORE_SCHEMA,
+        label=f"score {candidate.title!r}",
+    )
+    # A malformed score must surface as a GateError like every other bad reply - a bare
+    # KeyError used to escape the error handling meant for exactly this.
+    match = scored.get("match")
+    has_technique = scored.get("has_technique")
+    justification = scored.get("justification")
+    well_formed = (
+        isinstance(match, str)
+        and isinstance(has_technique, bool)
+        and isinstance(justification, str)
+    )
+    if not well_formed:
+        raise GateError(f"unusable score for {candidate.title!r}: {str(scored)[:200]}")
 
-    match = scored["match"]
-    has_technique = bool(scored["has_technique"])
     # Both conditions must hold. Novelty alone is not enough: a tool announcement is
     # genuinely unfamiliar and still worthless, which is exactly how an earlier version
     # of this gate kept a Go fuzzing release.
@@ -185,5 +189,5 @@ def judge_behavioral(candidate: Candidate, *, client=None) -> Verdict:
         # informative in the reject log than a self-assessment would be.
         already_known=(p.mechanism if p.recognised else "Not recognised from the title."),
         reason=reason,
-        justification=f"[{note}] {scored['justification']}",
+        justification=f"[{note}] {justification}",
     )

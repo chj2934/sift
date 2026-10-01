@@ -7,12 +7,17 @@ dilutes ranking, pushing genuinely rare hits down the list. So the default is
 
 Only Opus can judge what Opus knows; a local model would be guessing about weights
 it has no visibility into. That's why the gate is an API call rather than the local
-Qwen used elsewhere for grunt work.
+Qwen used elsewhere for grunt work. For the same reason the gate never falls back to
+another model on a refusal: a different model's verdict says nothing about this one's
+knowledge, so a refusal is an error, not a verdict.
+
+Day-to-day gating is in-session (`distill.manual`); the API path here is what
+`distill eval` calibrates.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+import json
 
 from pydantic import BaseModel, Field
 
@@ -23,9 +28,43 @@ from sift.distill.candidates import Candidate
 KEEP_REASONS = ("post-cutoff", "obscure-variant", "operational-detail")
 _ALL_REASONS = (*KEEP_REASONS, "already-known")
 
+# Accepted values of `output_config.effort`. Checked where the gate runs rather than in
+# Settings: the MCP server loads Settings for every tool call, and a typo in a
+# gate-only variable must not take search down with it.
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
+# Thinking tokens count against max_tokens, and at 4,000 a long think cut the JSON
+# verdict off mid-string, which surfaced as a misleading parse error.
+MAX_TOKENS = 16_000
+
+# Gate calls stream, so the read timeout bounds the silence between two stream events,
+# not the whole generation. A non-streaming call can only be given one timeout for
+# both, and the SDK's 10 minutes (retried twice) let a stalled connection hold a run
+# for about half an hour per candidate. Now a stall fails in two minutes, while a long
+# high-effort think still completes because events keep arriving.
+STREAM_READ_TIMEOUT_S = 120.0
+CONNECT_TIMEOUT_S = 10.0
+
+# HTTP statuses that fail every remaining call in a run the same way. One of these on
+# the first candidate means the next 119 would repeat it, paid for nothing.
+_FATAL_STATUS = {
+    401: "authentication failed - check ANTHROPIC_API_KEY or run `ant auth login`",
+    402: "billing problem on the Anthropic account",
+    403: "permission denied for this credential",
+    404: "model not found - check SIFT_GATE_MODEL",
+}
+
 
 class GateError(RuntimeError):
     """Gate could not run (missing credentials, unusable response)."""
+
+
+class GateConfigError(GateError):
+    """The gate cannot run at all - credentials, model, effort or billing.
+
+    Unlike a refused or unparseable reply, retrying the next candidate only repeats it,
+    so batch callers stop on this instead of logging it per candidate.
+    """
 
 
 class Verdict(BaseModel):
@@ -94,65 +133,119 @@ def _build_user_prompt(candidate: Candidate) -> str:
     )
 
 
-def _client():
-    import os
+def gate_settings() -> tuple[str, str]:
+    """(model, effort) for gate calls. Raises GateConfigError on an unknown effort."""
+    s = get_settings()
+    if s.gate_effort not in EFFORT_LEVELS:
+        raise GateConfigError(
+            f"SIFT_GATE_EFFORT={s.gate_effort!r} is not one of {'|'.join(EFFORT_LEVELS)}"
+        )
+    return s.gate_model, s.gate_effort
 
+
+def _resolve_client():
+    """An Anthropic client from whatever credentials the SDK can find.
+
+    A key from Settings (.env or the environment) is passed explicitly; without one the
+    SDK walks its own chain - ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, an
+    `ANTHROPIC_PROFILE` or `ant auth login` profile, workload identity. This used to
+    check only the two env vars, so the `ant auth login` the error message recommends
+    was refused.
+    """
     import anthropic  # deferred: keeps the dep off the CLI hot import path
 
-    key = get_settings().anthropic_api_key
-    if key:
-        return anthropic.Anthropic(api_key=key)
-    # No key in .env is not the same as no credentials — the SDK also resolves
-    # ANTHROPIC_AUTH_TOKEN and `ant auth login` profiles. Only bail if nothing is
-    # available, since the SDK itself fails late (at request time) with a TypeError.
-    if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
-        raise GateError(
+    key = get_settings().anthropic_api_key or None
+    try:
+        client = anthropic.Anthropic(api_key=key)
+    except anthropic.AnthropicError as exc:  # an explicitly selected profile is broken
+        raise GateConfigError(
+            f"Anthropic credentials are configured but unusable: {exc}. Fix the profile, "
+            "set ANTHROPIC_API_KEY in .env, or run `ant auth login`."
+        ) from exc
+    # The SDK itself only fails late, at request time, when it found nothing.
+    if client.api_key is None and client.auth_token is None and client.credentials is None:
+        raise GateConfigError(
             "no Anthropic credentials for the novelty gate. "
             "Set ANTHROPIC_API_KEY in .env, or run `ant auth login`."
         )
-    return anthropic.Anthropic()
+    return client
+
+
+def _client():
+    """A client for gate calls, after checking the gate settings it will be used with."""
+    gate_settings()  # fail before any spend, not on the first candidate
+    return _resolve_client()
+
+
+def credentials_available() -> bool:
+    """Whether the SDK can resolve Anthropic credentials (env, .env or an ant profile).
+
+    Never raises, so it is safe in a test skip condition.
+    """
+    try:
+        _resolve_client()
+    except Exception:  # noqa: BLE001 - a probe: any failure means "not available"
+        return False
+    return True
+
+
+def run_fatal(exc: BaseException) -> str | None:
+    """Why `exc` would fail every remaining candidate too, or None if it is specific
+    to this one (a refusal, a malformed reply, a transient error)."""
+    if isinstance(exc, GateConfigError):
+        return str(exc)
+    status = getattr(exc, "status_code", None)
+    if status not in _FATAL_STATUS:
+        return None
+    import anthropic
+
+    if not isinstance(exc, anthropic.APIStatusError):
+        return None
+    return f"{_FATAL_STATUS[status]} (HTTP {status}: {exc})"
+
+
+def _create_json(client, *, system: str, user: str, schema: dict, label: str) -> dict:
+    """One structured-output call, shared by every gate design. Raises GateError.
+
+    Streams and returns the final message (see STREAM_READ_TIMEOUT_S); API errors
+    propagate as the SDK's own exceptions, for `run_fatal` to classify.
+    """
+    import anthropic  # deferred: keeps the dep off the CLI hot import path
+
+    model, effort = gate_settings()
+    with client.messages.stream(
+        model=model,
+        max_tokens=MAX_TOKENS,
+        system=system,
+        messages=[{"role": "user", "content": user}],
+        output_config={"effort": effort, "format": {"type": "json_schema", "schema": schema}},
+        timeout=anthropic.Timeout(STREAM_READ_TIMEOUT_S, connect=CONNECT_TIMEOUT_S),
+    ) as stream:
+        resp = stream.get_final_message()
+    if resp.stop_reason == "refusal":
+        raise GateError(f"{label}: the model refused")
+    if resp.stop_reason == "max_tokens":
+        raise GateError(f"{label}: reply truncated at max_tokens={MAX_TOKENS} (effort={effort})")
+    try:
+        data = json.loads(next(b.text for b in resp.content if b.type == "text"))
+    except (StopIteration, json.JSONDecodeError) as exc:
+        raise GateError(f"{label}: unusable response: {exc}") from exc
+    if not isinstance(data, dict):
+        raise GateError(f"{label}: expected a JSON object, got {type(data).__name__}")
+    return data
 
 
 def judge(candidate: Candidate, *, client=None) -> Verdict:
     """Ask the model whether it already knows this. Raises GateError on failure."""
-    import json
-
-    s = get_settings()
     client = client or _client()
-    resp = client.messages.create(
-        model=s.gate_model,
-        max_tokens=4000,
+    data = _create_json(
+        client,
         system=GATE_SYSTEM,
-        messages=[{"role": "user", "content": _build_user_prompt(candidate)}],
-        output_config={
-            "effort": s.gate_effort,
-            "format": {"type": "json_schema", "schema": _SCHEMA},
-        },
+        user=_build_user_prompt(candidate),
+        schema=_SCHEMA,
+        label=f"gate {candidate.title!r}",
     )
-    if resp.stop_reason == "refusal":
-        raise GateError(f"gate refused: {candidate.title!r}")
     try:
-        text = next(b.text for b in resp.content if b.type == "text")
-        return Verdict(**json.loads(text))
-    except (StopIteration, json.JSONDecodeError, TypeError, ValueError) as exc:
+        return Verdict(**data)
+    except (TypeError, ValueError) as exc:
         raise GateError(f"unusable gate response for {candidate.title!r}: {exc}") from exc
-
-
-def judge_many(
-    candidates: Iterable[Candidate], *, client=None
-) -> Iterator[tuple[Candidate, Verdict]]:
-    """Judge a stream, logging rejects. One bad candidate never aborts the run."""
-    from sift.distill.rejects import record_reject
-
-    client = client or _client()
-    for cand in candidates:
-        # Broad by design, matching ingest.base.run_source: one transient API error
-        # must not abort a 500-candidate batch.
-        try:
-            verdict = judge(cand, client=client)
-        except Exception as exc:
-            print(f"  ! gate: {cand.title!r}: {exc}")
-            continue
-        if not verdict.keep:
-            record_reject(cand, verdict)
-        yield cand, verdict

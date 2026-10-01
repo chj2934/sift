@@ -16,11 +16,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from sift.config import PROJECT_ROOT
-from sift.distill.candidates import Candidate
-from sift.distill.gate import Verdict
+from sift.distill.candidates import Candidate, best_copies, url_key
+from sift.distill.gate import GateConfigError, Verdict, run_fatal
 from sift.vault.notes import iter_notes
 
 LABELS_PATH = PROJECT_ROOT / "tests" / "fixtures" / "gate_labels.json"
+
+# A 400 can be specific to one candidate's content, so one is logged and skipped. Three
+# in a row means the request itself is wrong (a bad model id or parameter), and the
+# rest of the run would fail the same way.
+MAX_CONSECUTIVE_BAD_REQUESTS = 3
 
 
 @dataclass
@@ -43,14 +48,25 @@ def load_labels(path: Path | None = None) -> dict[str, str]:
 
 
 def labelled_candidates(labels: dict[str, str], vault: Path) -> list[tuple[Candidate, str]]:
-    """Pair each label with its note, which still holds the full article text."""
-    by_url = {n.meta.url: n for n in iter_notes(vault, note_type="writeup") if n.meta.url}
+    """Pair each label with the copy of its article that production would gate.
+
+    Same selection as `manual.collect` - the longest body per url key - but with no
+    gated-url filter (the labelled articles are already judged, so filtering would empty
+    the set) and no prefilter (eval scores the gate alone). Keying on the raw url used
+    to score 5 of the 40 labelled articles on a different, shorter copy than production
+    would send.
+    """
+    best, _ = best_copies(iter_notes(vault, note_type="writeup"))
     out = []
     for url, decision in labels.items():
-        note = by_url.get(url)
-        if note is not None:
-            out.append((Candidate.from_note(note), decision))
+        cand = best.get(url_key(url))
+        if cand is not None:
+            out.append((cand, decision))
     return out
+
+
+def _is_bad_request(exc: BaseException) -> bool:
+    return getattr(exc, "status_code", None) == 400
 
 
 def score_gate(
@@ -61,15 +77,33 @@ def score_gate(
     client=None,
     on_result: Callable[[str, Candidate, Verdict | None, str], None] | None = None,
 ) -> Score:
+    """Run `judge` over the labelled pairs.
+
+    One bad candidate never voids the run, but a run-fatal error (credentials, billing,
+    an unknown model, a bad effort setting, or repeated 400s) raises GateConfigError on
+    the spot - otherwise every remaining call fails identically and the report reads
+    0/0.
+    """
     s = Score(name=name)
+    bad_requests = 0
     for cand, human in pairs:
         try:
             verdict = judge(cand, client=client)
         except Exception as exc:  # one bad candidate must not void the run
+            fatal = run_fatal(exc)
+            if fatal:
+                raise GateConfigError(f"{name}: {fatal}") from exc
+            bad_requests = bad_requests + 1 if _is_bad_request(exc) else 0
+            if bad_requests >= MAX_CONSECUTIVE_BAD_REQUESTS:
+                raise GateConfigError(
+                    f"{name}: {bad_requests} consecutive 400 Bad Request replies - the "
+                    f"request itself is invalid (check SIFT_GATE_MODEL): {exc}"
+                ) from exc
             s.errors.append(f"{cand.title[:60]}: {exc}")
             if on_result:
                 on_result(name, cand, None, human)
             continue
+        bad_requests = 0
         s.total += 1
         got = "keep" if verdict.keep else "drop"
         if got == human:

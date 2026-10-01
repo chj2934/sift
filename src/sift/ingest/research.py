@@ -4,25 +4,38 @@ The point of this source (unlike the bulk disclosed-report corpus) is *freshness
 post-training-cutoff techniques the reasoning model can't already know. Defaults
 to PortSwigger Research; add more feeds with ``SIFT_RESEARCH_FEEDS`` (comma-sep).
 
+The horizon defaults to ``SIFT_MODEL_CUTOFF`` (CLAUDE.md): an entry published before
+it is something the model trained on, so it is skipped before any fetch. Undated
+entries are kept. Pass an older ``since`` to go deeper.
+
 By default a note carries the feed's summary/excerpt plus a link. ``--fetch-body``
-also pulls the article page and does a crude HTML->text extraction.
+also pulls the article page and extracts its text (`sift.ingest.article`).
+
+An entry already in the vault (same article URL, among research notes) is not fetched
+or yielded again unless ``refresh``. A refresh never replaces a longer stored body with
+a shorter one - a feed teaser, or the excerpt left after a failed body fetch - only the
+frontmatter is refreshed.
 """
 
 from __future__ import annotations
 
 import html
+import logging
 import re
 from collections.abc import Iterator
 from datetime import date
+from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
 from slugify import slugify
 
 from sift.config import get_settings
-from sift.ingest.base import clean_text
-from sift.vault.notes import Note
+from sift.ingest.base import KnownNotes, canonical_url, clean_text, id_family, safe_get
+from sift.vault.notes import Note, load_note, locate_note
 from sift.vault.schema import Frontmatter
+
+log = logging.getLogger(__name__)
 
 # High-signal security research blogs. These publish novel technique rather than
 # commentary, so they clear the novelty gate far more often than aggregators do.
@@ -89,7 +102,10 @@ def _feeds() -> list[str]:
 
 
 def _host(url: str) -> str:
-    return (urlparse(url).hostname or "").removeprefix("www.")
+    try:
+        return (urlparse(url).hostname or "").removeprefix("www.")
+    except ValueError:  # "http://[::1/x": one malformed link must not end the run
+        return ""
 
 
 def _entry_date(entry) -> date | None:
@@ -150,25 +166,21 @@ def _html_to_text(raw: str) -> str:
 
 
 def _fetch_body(client: httpx.Client, url: str) -> str:
-    try:
-        r = client.get(url)
-        r.raise_for_status()
-    except httpx.HTTPError as exc:
-        print(f"  ! research: body fetch failed for {url}: {exc}")
-        return ""
-    text = extract_article(r.text)[:BODY_CHARS]
-    # Same guards the other sources use: a PDF or undecodable response yields binary,
-    # and a JS-rendered page yields the nav menu. Either would become note text and
-    # cost a gate call while teaching nothing.
-    from sift.ingest.top10 import looks_like_prose
+    """The article's full text, or "" (the note then keeps the feed excerpt).
 
-    if text and not looks_like_prose(text):
-        print(f"  ! research: body is not text, keeping excerpt only for {url}")
+    Same guards as every other source (`sift.ingest.article`): a PDF or undecodable
+    response yields binary, and a JS-rendered page yields the nav menu. Either would
+    become note text and cost a gate call while teaching nothing. Unlike writeups,
+    there is no length floor: a short body still beats no body here, because the
+    excerpt is the fallback rather than nothing.
+    """
+    from sift.ingest.article import fetch_article  # deferred: article imports this module
+
+    res = fetch_article(client, url, min_chars=1, medium_via_feed=False)
+    if res.reason:
+        log.warning("research: no body for %s (%s); keeping the feed excerpt", url, res.reason)
         return ""
-    if extraction_failed(text, r.text):
-        print(f"  ! research: extraction got boilerplate ({len(text)} chars), skipping body for {url}")
-        return ""
-    return text
+    return res.text
 
 
 def _to_note(entry, feed_url: str, *, body_text: str = "") -> Note | None:
@@ -206,40 +218,97 @@ def _to_note(entry, feed_url: str, *, body_text: str = "") -> Note | None:
     return Note(meta=meta, body=body.strip())
 
 
+def keep_longer_stored_body(vault: Path, known: KnownNotes, note: Note) -> bool:
+    """Give `note` the stored body of the same article when that one is longer.
+
+    A refresh re-yields notes already in the vault; without this, the feed teaser (or
+    the excerpt left after a failed `--fetch-body`) silently replaced a full article
+    - 7,575 chars became 88 in a measured case. Only the body is kept; frontmatter is
+    still refreshed. Returns whether the stored body was kept.
+    """
+    cu = canonical_url(note.meta.url)
+    if not cu:
+        return False
+    for note_id in known.ids_for_url(note.meta.url, family=id_family(note.meta.id)):
+        path = locate_note(vault, note_id)
+        if path is None:
+            continue
+        try:
+            stored = load_note(path)
+        except Exception as exc:  # noqa: BLE001 - unreadable: run_source decides what to do
+            log.debug("research: could not read %s: %s", path, exc)
+            continue
+        if canonical_url(stored.meta.url) != cu:
+            continue
+        if len(stored.body.strip()) > len(note.body.strip()):
+            note.body = stored.body
+            return True
+        return False
+    return False
+
+
 def source(
-    *, limit: int | None = None, fetch_body: bool = False, refresh: bool = False
+    *,
+    limit: int | None = None,
+    fetch_body: bool = False,
+    refresh: bool = False,
+    since: date | None = None,
 ) -> Iterator[Note]:
+    """Feed entries published on/after ``since`` (default ``SIFT_MODEL_CUTOFF``).
+
+    ``limit`` counts notes yielded, i.e. new ones unless ``refresh``. With the
+    horizon in place, ``refresh`` only reaches entries newer than it: pass an older
+    ``since`` too to upgrade pre-cutoff excerpts.
+    """
     import feedparser  # deferred: keeps the dep out of the hot import path
 
-    vault = get_settings().resolved_vault()
-    seen = 0
+    from sift.ingest.medium import is_medium
+
+    settings = get_settings()
+    vault = settings.resolved_vault()
+    horizon = since or settings.model_cutoff
+    known = KnownNotes(vault)
+    seen_urls: set[str] = set()  # one article carried by two feeds in this run
+    yielded = 0
+    old = 0
     with httpx.Client(
         timeout=60,
         follow_redirects=True,
         headers={"User-Agent": "sift-research-ingest/0.1 (personal bug-bounty memory)"},
     ) as client:
         for feed_url in _feeds():
-            try:
-                raw = client.get(feed_url)
-                raw.raise_for_status()
-            except httpx.HTTPError as exc:
-                print(f"  ! research: could not fetch {feed_url}: {exc}")
+            raw = safe_get(client, feed_url, what="research feed")
+            if raw is None:
                 continue
             parsed = feedparser.parse(raw.content)
             for entry in parsed.entries:
-                title = clean_text(entry.get("title"))
-                if not title:
+                stub = _to_note(entry, feed_url)  # no network: id, title and url
+                if stub is None:
                     continue
-                slug = slugify(f"research-{slugify(title, max_length=90)}", max_length=80)
-                if not refresh and (vault / "writeup" / f"{slug}.md").exists():
-                    continue  # already have it — don't re-fetch the body
+                published = _entry_date(entry)
+                if published is not None and published < horizon:
+                    old += 1  # pre-cutoff: the model already knows it
+                    continue
+                cu = canonical_url(stub.meta.url)
+                if cu in seen_urls:
+                    continue
+                seen_urls.add(cu)
+                if not refresh and known.has(stub.meta):
+                    continue  # already have it - don't re-fetch the body
                 body_text = ""
-                if fetch_body and entry.get("link"):
-                    body_text = _fetch_body(client, entry["link"])
-                note = _to_note(entry, feed_url, body_text=body_text)
-                if not note:
+                # Medium 403s every article fetch; the feed's content block is the
+                # sanctioned copy and `_to_note` already uses it.
+                if fetch_body and not is_medium(stub.meta.url):
+                    body_text = _fetch_body(client, stub.meta.url)
+                note = _to_note(entry, feed_url, body_text=body_text) if body_text else stub
+                if note is None:
                     continue
+                if refresh:
+                    keep_longer_stored_body(vault, known, note)
                 yield note
-                seen += 1
-                if limit and seen >= limit:
+                known.add(note.meta)
+                yielded += 1
+                if limit and yielded >= limit:
                     return
+    if old:
+        log.info("research: skipped %d entries published before %s", old, horizon.isoformat())

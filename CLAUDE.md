@@ -8,15 +8,20 @@ search, exposed to Claude Code as an MCP server.
 `sift` is not on PATH. Use `uv run --no-sync sift ...`, or activate `.venv\Scripts\Activate.ps1`.
 
 ```
-uv run --no-sync pytest              # 110 tests, offline
-uv run --no-sync ruff check src tests
+uv run --no-sync python -m pytest                  # offline; the pytest.exe trampoline is broken here
+uv run --no-sync ruff check src tests && uv run --no-sync ruff format --check src tests   # CI runs both
 ```
 
 Live novelty-gate calibration costs a few cents and is opt-in:
 
 ```
-uv run --no-sync pytest tests/test_gate_calibration.py -m calibration
+uv run --no-sync python -m pytest tests/test_gate_calibration.py -m calibration
 ```
+
+Maintenance commands: `sift status` (counts, index health, last ingests), `sift doctor`
+(read-only: duplicate ids, unreadable notes, index rows whose file is gone), `sift
+reindex` (incremental; `--force` after a model or chunker change, `--rescore` after a
+scoring change), `sift compact` (index compaction), `sift prune`, `sift trash`.
 
 ## Working a bug bounty target
 
@@ -33,6 +38,27 @@ validated properly" is exactly the note that stops a future session re-testing a
 end. A `failed` outcome is a result, not a non-result.
 
 `list_notes(status="hypothesis")` surfaces ideas that were never followed up.
+
+**Address notes by `note_id`.** Every tool returns it, and `get_note` takes an id, slug,
+legacy 80-char slug, filename or vault path; an ambiguous reference returns the
+candidates instead of guessing. The MCP tools:
+
+- `search_memory`, `get_note` (optionally one `section`), `list_notes` (type, program,
+  status, tag, source, `since`, `sort="recent"`), `stats`.
+- `remember` appends to a note it already wrote under the same title (type and
+  program), instead of forking `Title (2).md`; pass `note_id` to append to a specific
+  note. Use `update_note` for corrections (it replaces fields or the body; notes you
+  didn't write need `force`).
+- `capture_idea` / `resolve_idea` for hypotheses and their outcome.
+- `forget_note` soft-deletes: the file moves to `<vault>/.trash/` and its id/url are
+  tombstoned so a re-ingest doesn't bring it back. Undo: `sift trash restore <note_id>`,
+  then `sift reindex`.
+- `capture_url` stores one fresh article verbatim. It refuses private and internal hosts
+  (on every redirect hop) and anything published before `SIFT_MODEL_CUTOFF` unless
+  `force`. CLI twin: `sift ingest url URL`.
+
+The server is `sift mcp` (or `python -m sift.mcp_server`). It never prints: stdout is
+the JSON-RPC wire.
 
 **Each program gets a `target` note and a `tool` note.** The target note holds scope,
 known issues and attack directions; the tool note holds the setup — clone path, package
@@ -52,6 +78,13 @@ model would fumble, and the user's own per-target results.
 
 If you change `GATE_SYSTEM` in `src/sift/distill/gate.py`, re-run the calibration
 tests. A silent gate regression turns the vault to noise.
+
+Gating is in-session only: `sift distill export` writes candidates, the model judges
+them, `sift distill apply VERDICTS --candidates candidates.jsonl` applies the verdicts
+against that same export (no `--type` needed). There is no unattended API path. An
+exported row's `text` is only the gate excerpt; when `truncated` is true, read the full
+note at `path` (or `get_note(note_id)`) before writing `body_md` - the payloads further
+down the article are exactly what a keep is for.
 
 ### The same rule, applied at ingest: `SIFT_MODEL_CUTOFF`
 
@@ -101,12 +134,18 @@ half-ingested corpus that says it succeeded is the failure mode that matters her
 ## Conventions
 
 - Settings are pydantic-settings fields with explicit `alias=` (no env prefix); add
-  new ones to `.env.example` too. Everything reads `get_settings()`.
+  new ones to `.env.example` too (a test fails otherwise). Everything reads
+  `get_settings()`. A blank `KEY=` means "use the default".
 - CLI: heavy imports go *inside* command functions to keep startup fast. `cli.py`
   reconfigures stdout to UTF-8 before importing typer (Windows cp1252), hence its
   `E402` exemption.
+- Library code never `print()`s (ruff `T20` enforces it outside `cli.py` and tests):
+  stdout is the MCP server's JSON-RPC wire. Use `logging.getLogger(__name__)`; the CLI
+  sends the `sift` loggers to stderr (INFO), the MCP server to stderr (WARNING).
 - Tests import `sift.*` **inside** test bodies — the autouse `_isolated_env` fixture
   must set env vars before settings load. Hence the `E402` exemption for `tests/*`.
+  The fixture also hides the real `.env`, every inherited `SIFT_*` variable and all
+  credentials. The opt-in `fake_embedder` fixture replaces the model.
 - Ingest sources are plain callables returning `Iterator[Note]`, run via
   `ingest.base.run_source`, which handles saving, batched indexing and `_state.json`.
 - Keep parsing in pure underscore-private helpers, separate from I/O, so tests can
@@ -136,13 +175,51 @@ destroyed good research.
   Assetnote advisories.
 - **`looks_like_prose` is script-agnostic on purpose.** An ASCII-word version scored a
   Japanese writeup at 0.167 and would have discarded it.
-- **Slug collisions.** Ids truncate to 80 chars, so similar long titles collide;
-  `run_source` disambiguates and reports `collisions`. It used to overwrite silently
-  and still report success.
+- **Slug collisions.** Ids used to truncate to 80 chars, so similar long titles
+  collided and one article silently overwrote another while the run reported success.
+  Now: slugs are uncapped (the legacy 80-char form still resolves, and an ambiguous one
+  is reported, never guessed); `save_note` is an upsert by id that raises `IdConflict`
+  rather than write a *different* document under an existing id; title-keyed sources
+  (`research-`, `writeup-`, `top10-`) resolve the id by canonical URL and give a
+  clashing article a stable URL-hashed id. `collisions` counts real disambiguations.
+  Articles lost to the old overwrites come back with one `--refresh` re-ingest.
+- **One note per id.** A note keeps the file it lives in, even one renamed or moved in
+  Obsidian; KEV and NVD merge into one note per CVE (per-feed body sections, tag union,
+  EPSS kept). Existing same-id pairs are left alone: `sift doctor` lists them, and you
+  merge them by hand after judging the bodies.
+- **Already stored is skipped.** research, writeups and top10 skip stored articles by
+  canonical URL within their own id family, and a `--refresh` never shortens a stored
+  body (a teaser must not replace a full article). Identical re-ingests are neither
+  rewritten nor re-embedded. `research` defaults its horizon to `SIFT_MODEL_CUTOFF`.
+- **Prune fails closed.** Only dated `report`/`cve` notes from bulk sources (`nvd`,
+  `hackerone-public`, `hackerone-hacktivity`, `cisa-kev`) can be pruned; anything the
+  user wrote is kept. `sift prune --yes` moves drops to `data/pruned/<stamp>/` (outside
+  the vault, gitignored), never unlinks, and tombstones them in
+  `<db>/tombstones.jsonl` so a bulk re-ingest doesn't resurrect them (the ledger
+  survives `reindex --force`). `sift prune --restore <folder>` undoes it.
+- **Per-page guards live in one place**, `sift/ingest/article.py`, shared by the batch
+  sources and single-URL capture. `sift ingest notes` backfills only missing frontmatter
+  keys (BOM-safe) and lists the files it leaves untouched. chrome-releases never
+  rewrites its ledger from a truncated or failed walk.
 
 ## Gotchas
 
-- **Schema changes to `ChunkRow` require `sift reindex --force`.**
+- **Schema changes to `ChunkRow` require `sift reindex --force`**, and so does a new
+  embed model or chunker. The index records how it was built in `<db>/index_meta.json`;
+  `sift status` and every reindex say when it is stale. Chunk ids are per file
+  (`{note_id}::{path hash}::{n}`).
+- **Pending one-off user steps** (heavy; hand the user the command, never run them):
+  `uv run --no-sync sift compact` once (the index had ~12.9k fragments and 29 GB of old
+  versions; minutes; safe with MCP servers running, but not during an ingest), then
+  `uv run --no-sync sift reindex --force` once (chunks now fit the embedder's 512-token
+  window; slugs and chunk ids changed). Until then reindex logs that the index records
+  no chunker version, and routine compaction asks for `sift compact`.
+- Ingests and reindex compact the index routinely (`Store.optimize`); MCP tools never do.
+  An incremental `sift reindex` removes the rows of deleted or emptied notes, and refuses
+  a mass reap (unmounted drive, wrong `SIFT_VAULT_PATH`) unless `--allow-mass-reap`.
+- The MCP server syncs vault edits into the index in the background and warms the
+  models after `initialize` (`SIFT_MCP_AUTO_SYNC`, `SIFT_MCP_WARMUP`, see `.env.example`
+  for the VRAM cost and `SIFT_QUERY_DEVICE=cpu`).
 - Never Ctrl-C `uv sync` mid-run — it has corrupted the venv before.
 - `onnxruntime` is pinned `<1.29` (severe CPU inference regression in 1.29.x).
 - Benign `WARN ... latest_version_hint.json: Access is denied` during indexing is a

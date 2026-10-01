@@ -206,8 +206,7 @@ def test_doc_note_leads_with_the_change_and_tags_novelty():
 
     assert note.meta.type == "reference"
     assert note.meta.title == (
-        "Chromium: Severity Guidelines for Security Issues "
-        "(docs/security/severity-guidelines.md)"
+        "Chromium: Severity Guidelines for Security Issues (docs/security/severity-guidelines.md)"
     )
     assert "changed-doc" in note.meta.tags and "severity" in note.meta.tags
     assert "new-doc" not in note.meta.tags
@@ -221,7 +220,9 @@ def test_doc_note_leads_with_the_change_and_tags_novelty():
 def test_new_doc_says_the_whole_thing_is_new():
     from sift.ingest.chromium_docs import DocChange, to_note
 
-    change = DocChange(path="docs/security/x.md", commits=[("a1b2c3", "2026-09-03", "Add")], added=True)
+    change = DocChange(
+        path="docs/security/x.md", commits=[("a1b2c3", "2026-09-03", "Add")], added=True
+    )
     note = to_note("docs/security/x.md", DOC_TEXT, "deadbeef", change)
     assert "new-doc" in note.meta.tags
     assert "did not exist at training time" in note.body
@@ -287,7 +288,7 @@ def test_rolls_are_dropped_but_relands_are_kept():
     from sift.ingest.chromium_fixes import classify
 
     assert classify("Roll src/third_party/x: fix use-after-free") == []
-    assert classify("Revert \"Validate the renderer-supplied origin\"") == []
+    assert classify('Revert "Validate the renderer-supplied origin"') == []
     assert classify('Reland "Validate RenderFrameMetadata fields during Mojo deserialization"') == [
         "boundary-enforcement"
     ]

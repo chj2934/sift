@@ -7,11 +7,17 @@ is almost exactly the novelty gate's own criterion. That makes this the highest
 pass-rate discovery source available, far better than scraping aggregators.
 
 Fetches each linked article and stores it as a `writeup` note for the gate to judge.
+
+A link already stored as a top10 note (same article URL) is not fetched again unless
+``refresh``. The check is keyed on the URL because the title, and so the id, only
+exists after the fetch. It is scoped to top10 notes on purpose: an article a research
+feed already carried still gets its top10 note, tags and nomination year.
 """
 
 from __future__ import annotations
 
 import html
+import logging
 import re
 import time
 from collections.abc import Iterator
@@ -22,10 +28,11 @@ import httpx
 from slugify import slugify
 
 from sift.config import get_settings
-from sift.ingest.base import clean_text
-from sift.ingest.research import BODY_CHARS, extract_article, extraction_failed
+from sift.ingest.base import KnownNotes, canonical_url, clean_text, safe_get
 from sift.vault.notes import Note
 from sift.vault.schema import Frontmatter
+
+log = logging.getLogger(__name__)
 
 UA = "sift-research-ingest/0.1 (personal bug-bounty memory)"
 BASE = "https://portswigger.net/research/top-10-web-hacking-techniques-of-{year}"
@@ -38,10 +45,25 @@ DEFAULT_YEARS = (2021, 2022, 2023, 2024, 2025)
 # domain is excluded because those articles arrive via the research RSS feed instead.
 _DENY_HOSTS = frozenset(
     {
-        "portswigger.net", "twitter.com", "x.com", "t.co", "bsky.app", "linkedin.com",
-        "docs.google.com", "forms.gle", "youtube.com", "youtu.be", "api.whatsapp.com",
-        "infosec.exchange", "mastodon.social", "discord.com", "discord.gg",
-        "reddit.com", "facebook.com", "news.ycombinator.com", "web.archive.org",
+        "portswigger.net",
+        "twitter.com",
+        "x.com",
+        "t.co",
+        "bsky.app",
+        "linkedin.com",
+        "docs.google.com",
+        "forms.gle",
+        "youtube.com",
+        "youtu.be",
+        "api.whatsapp.com",
+        "infosec.exchange",
+        "mastodon.social",
+        "discord.com",
+        "discord.gg",
+        "reddit.com",
+        "facebook.com",
+        "news.ycombinator.com",
+        "web.archive.org",
     }
 )
 
@@ -74,7 +96,9 @@ def looks_like_prose(text: str) -> bool:
     if not text:
         return False
     sample = text[:20000]
-    good = sum(1 for c in sample if c.isalnum() or c.isspace() or c in "-_.,:;!?'\"()[]{}/<>@#$%&*+=|\\~`^")
+    good = sum(
+        1 for c in sample if c.isalnum() or c.isspace() or c in "-_.,:;!?'\"()[]{}/<>@#$%&*+=|\\~`^"
+    )
     return (good / len(sample)) > 0.90
 
 
@@ -82,8 +106,13 @@ def looks_like_prose(text: str) -> bool:
 # got 1 Jan of its nomination year - so a February 2020 article was stamped 2024 and
 # scored as recent by SIFT_RECENCY_WEIGHT.
 _DATE_PATTERNS = (
-    re.compile(r'<meta[^>]+property=["\']article:published_time["\'][^>]+content=["\']([^"\']+)', re.I),
-    re.compile(r'<meta[^>]+name=["\'](?:date|pubdate|publish[-_]?date)["\'][^>]+content=["\']([^"\']+)', re.I),
+    re.compile(
+        r'<meta[^>]+property=["\']article:published_time["\'][^>]+content=["\']([^"\']+)', re.I
+    ),
+    re.compile(
+        r'<meta[^>]+name=["\'](?:date|pubdate|publish[-_]?date)["\'][^>]+content=["\']([^"\']+)',
+        re.I,
+    ),
     re.compile(r'["\']datePublished["\']\s*:\s*["\']([^"\']+)', re.I),
     re.compile(r'<time[^>]+datetime=["\']([^"\']+)', re.I),
 )
@@ -91,11 +120,18 @@ _ISO_DATE = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
 
 
 def _host(url: str) -> str:
-    return (urlparse(url).hostname or "").removeprefix("www.")
+    try:
+        return (urlparse(url).hostname or "").removeprefix("www.")
+    except ValueError:  # "http://[::1/x": unparseable, so not a research link
+        return ""
 
 
-def article_date(page_html: str, fallback_year: int) -> date:
-    """Real publication date if the page exposes one, else 1 Jan of the nomination year."""
+def find_article_date(page_html: str, *, max_year: int) -> date | None:
+    """The page's own publication date, or None when it exposes none.
+
+    Sanity-bound to 1995..`max_year`: the web is full of stray dates in unrelated
+    markup.
+    """
     for pattern in _DATE_PATTERNS:
         for raw in pattern.findall(page_html)[:3]:
             m = _ISO_DATE.search(raw)
@@ -105,10 +141,14 @@ def article_date(page_html: str, fallback_year: int) -> date:
                 found = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
             except ValueError:
                 continue
-            # Sanity-bound it: the web is full of stray dates in unrelated markup.
-            if 1995 <= found.year <= fallback_year + 1:
+            if 1995 <= found.year <= max_year:
                 return found
-    return date(fallback_year, 1, 1)
+    return None
+
+
+def article_date(page_html: str, fallback_year: int) -> date:
+    """Real publication date if the page exposes one, else 1 Jan of the nomination year."""
+    return find_article_date(page_html, max_year=fallback_year + 1) or date(fallback_year, 1, 1)
 
 
 # Author bio / index pages linked from nomination lists - real sites, no technique.
@@ -208,7 +248,13 @@ def source(
     delay: float = 1.0,
     refresh: bool = False,
 ) -> Iterator[Note]:
+    """Nominated articles not yet stored as top10 notes. ``limit`` counts notes
+    yielded (new ones, unless ``refresh``)."""
+    from sift.ingest.article import fetch_article
+
     vault = get_settings().resolved_vault()
+    known = KnownNotes(vault)
+    feed_cache: dict = {}
     seen_urls: set[str] = set()
     written = 0
 
@@ -216,59 +262,45 @@ def source(
         for year in years:
             links: dict[str, str] = {}
             for index_url in _index_urls((year,)):
-                try:
-                    r = client.get(index_url)
-                    if r.status_code != 200:
-                        continue
-                except httpx.HTTPError as exc:
-                    print(f"  ! top10: {index_url}: {exc}")
+                r = safe_get(client, index_url, what="top10", raise_for_status=False)
+                if r is None:
                     continue
+                if delay:
+                    time.sleep(delay)
+                if r.status_code != 200:
+                    continue  # the "-nominations-open" page only exists some years
                 for url, text in _extract_links(r.text).items():
                     if len(text) > len(links.get(url, "")):
                         links[url] = text
-                time.sleep(delay)
 
-            print(f"  top10 {year}: {len(links)} research links")
+            log.info("top10 %d: %d research links", year, len(links))
 
             for url, anchor in links.items():
-                if url in seen_urls:
+                cu = canonical_url(url)
+                if cu in seen_urls:
                     continue
-                seen_urls.add(url)
+                seen_urls.add(cu)
+                if not refresh and known.has_url(url, family="top10"):
+                    continue  # already stored: don't fetch it again
 
-                probe_title = anchor or _host(url)
-                slug = slugify(f"top10-{slugify(probe_title, max_length=90)}", max_length=80)
-                if not refresh and (vault / "writeup" / f"{slug}.md").exists():
-                    continue
-
-                try:
-                    a = client.get(url)
-                    a.raise_for_status()
-                except httpx.HTTPError as exc:
-                    print(f"  ! top10: {url}: {exc}")
-                    continue
-                finally:
+                res = fetch_article(client, url, feed_cache=feed_cache)
+                if res.fetched and delay:
                     time.sleep(delay)
-
-                body_text = extract_article(a.text)[:BODY_CHARS]
-                if len(body_text) < 400:
-                    continue
-                if not looks_like_prose(body_text):  # PDF or other binary
-                    print(f"  ! top10: not text, skipping {url}")
-                    continue
-                if extraction_failed(body_text, a.text):  # JS-rendered or error page
-                    print(f"  ! top10: only boilerplate extracted, skipping {url}")
+                if not res.ok:
+                    log.info("top10: skipping %s (%s)", url, res.reason)
                     continue
 
-                note = _to_note(
-                    url,
-                    _article_title(a.text, anchor, url),
-                    body_text,
-                    year,
-                    published=article_date(a.text, year),
-                )
+                if res.via == "medium-feed":
+                    title = res.title or anchor
+                    published = res.published or date(year, 1, 1)
+                else:
+                    title = _article_title(res.html, anchor, url)
+                    published = article_date(res.html, year)
+                note = _to_note(url, title, res.text, year, published=published)
                 if note is None:
                     continue
                 yield note
+                known.add(note.meta)
                 written += 1
                 if limit and written >= limit:
                     return

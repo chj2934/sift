@@ -8,12 +8,20 @@ license = { text = "MIT" }
 authors = [{ name = "Caleb J" }]
 dependencies = [
     "anthropic>=0.40",
-    "lancedb>=0.20",
+    # merge_insert(...).when_not_matched_by_source_delete, optimize(cleanup_older_than),
+    # list_indices and index_stats: verified on 0.38.
+    "lancedb>=0.38",
     "pyarrow>=17",
     "fastembed>=0.7",
     # onnxruntime 1.29.x has a severe CPU inference regression (~5x slower). Pin below it.
     "onnxruntime>=1.19,<1.29",
-    "fastmcp>=3",
+    "fastmcp>=4",
+    # mcp >= 2.1 points fd 1 at stderr while serving stdio, so a stray print() cannot
+    # land between JSON-RPC frames. fastmcp 4 alone only requires mcp >= 2.0.
+    "mcp>=2.1.1",
+    # Cross-process locks: vault writes, the tombstone ledger, the ingest state file.
+    # (Already installed through huggingface_hub; declared because sift imports it.)
+    "filelock>=3.12",
     "typer>=0.12",
     "rich>=13.7",
     "python-frontmatter>=1.1",
@@ -71,17 +79,20 @@ line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
+# T20 (no print): in a library module a print() reaches stdout, which is the MCP
+# server's JSON-RPC wire. Use logging.getLogger(__name__); the CLI routes it to stderr.
+select = ["E", "F", "I", "UP", "B", "SIM", "T20"]
 ignore = ["E501"]  # long lines are mostly URLs / test fixtures; not worth wrapping
 
 [tool.ruff.lint.per-file-ignores]
-"src/sift/cli.py" = ["E402"]  # stdout reconfigure must run before importing typer/rich
-"tests/*" = ["E402"]  # tests import inside functions to hit the isolated-env fixture first
+# stdout reconfigure must run before importing typer/rich; stdout is the CLI's output.
+"src/sift/cli.py" = ["E402", "T20"]
+"tests/*" = ["E402", "T20"]  # tests import inside functions to hit the isolated-env fixture first
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Calibration hits the live API and costs money; opt in with `-m calibration`.
 addopts = "-q -m 'not calibration'"
 markers = [
-    "calibration: live novelty-gate checks (needs ANTHROPIC_API_KEY, costs a few cents)",
+    "calibration: live novelty-gate checks (needs Anthropic credentials, costs a few cents)",
 ]

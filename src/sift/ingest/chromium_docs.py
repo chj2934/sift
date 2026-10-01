@@ -23,6 +23,7 @@ against a named revision, which is why both are recorded.
 
 from __future__ import annotations
 
+import logging
 import re
 import subprocess
 from collections.abc import Iterator
@@ -34,8 +35,11 @@ from slugify import slugify
 
 from sift.config import get_settings
 from sift.ingest.base import clean_text
+from sift.ingest.existing import attach_existing
 from sift.vault.notes import Note
 from sift.vault.schema import Frontmatter
+
+log = logging.getLogger(__name__)
 
 # Everything under docs/security is in scope by definition. The rest is curated: docs
 # that decide a question a browser-process hunt actually asks.
@@ -121,7 +125,7 @@ def _git(src: Path, *args: str, timeout: int = 180) -> str:
             check=True,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        print(f"  ! chromium-docs: git {' '.join(args[:2])} failed: {exc}")
+        log.warning("chromium-docs: git %s failed: %s", " ".join(args[:2]), exc)
         return ""
     return out.stdout
 
@@ -198,7 +202,9 @@ def _doc_title(relpath: str, text: str) -> str:
     because several Chromium docs are all called "README".
     """
     m = _H1_RE.search(text)
-    heading = clean_text(m.group(1)) if m else Path(relpath).stem.replace("_", " ").replace("-", " ")
+    heading = (
+        clean_text(m.group(1)) if m else Path(relpath).stem.replace("_", " ").replace("-", " ")
+    )
     heading = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", heading).strip()  # link-wrapped headings
     heading = re.sub(r"\s*\{#.*\}$", "", heading).strip()  # anchor suffixes
     return f"Chromium: {heading} ({relpath})"
@@ -253,9 +259,7 @@ def to_note(relpath: str, text: str, sha: str, change: DocChange | None = None) 
         blocks.append(
             f"## {what} since the cutoff — {len(change.commits)} commit(s), "
             f"last {change.last_touched}\n"
-            + "\n".join(
-                f"- `{sha_}` {when} — {subject}" for sha_, when, subject in change.commits
-            )
+            + "\n".join(f"- `{sha_}` {when} — {subject}" for sha_, when, subject in change.commits)
             + (
                 "\n\nThis document did not exist at training time; all of it is new."
                 if change.added
@@ -332,23 +336,26 @@ def source(
     selected = paths if all_docs else [p for p in paths if p in changes]
 
     if not selected:
-        print(
-            f"  .. chromium-docs: no doc under docs/security or the curated set changed "
-            f"since {horizon.isoformat()} — nothing new to store. Use --all to take the "
-            f"whole corpus anyway."
+        log.info(
+            "chromium-docs: no doc under docs/security or the curated set changed since "
+            "%s - nothing new to store. Use --all to take the whole corpus anyway.",
+            horizon.isoformat(),
         )
         return
 
+    vault = settings.resolved_vault()
     seen = 0
     for relpath in selected:
         try:
             text = (src / relpath).read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
-            print(f"  ! chromium-docs: cannot read {relpath}: {exc}")
+            log.warning("chromium-docs: cannot read %s: %s", relpath, exc)
             continue
         if len(clean_text(text)) < 400:
             continue  # a stub or a redirect page, not a document
-        yield to_note(relpath, text, sha, changes.get(relpath))
+        # The id is the doc's path, i.e. the document. A sync that changes both the
+        # revision in its URL and its H1 is still an update of the same note.
+        yield attach_existing(vault, to_note(relpath, text, sha, changes.get(relpath)))
         seen += 1
         if limit and seen >= limit:
             return

@@ -1,6 +1,6 @@
 """Live calibration of the novelty gate. Opt-in — costs a few cents.
 
-    uv run --no-sync pytest tests/test_gate_calibration.py -m calibration
+    uv run --no-sync python -m pytest tests/test_gate_calibration.py -m calibration
 
 The gate is the product: if it drifts, the vault silently fills with material the
 model already knows and retrieval quality rots. Re-run this whenever GATE_SYSTEM
@@ -9,18 +9,26 @@ changes, and read the justifications rather than just the pass/fail.
 
 from __future__ import annotations
 
-import os
 from datetime import date
 
 import pytest
 
-pytestmark = [
-    pytest.mark.calibration,
-    pytest.mark.skipif(
-        not os.environ.get("ANTHROPIC_API_KEY"),
-        reason="live gate calibration needs ANTHROPIC_API_KEY",
-    ),
-]
+pytestmark = pytest.mark.calibration
+
+
+@pytest.fixture(autouse=True)
+def _needs_credentials():
+    """Skip, with the reason on screen, when no credentials resolve.
+
+    Checked per test with the SDK's own resolution - env, .env, or an `ant auth login`
+    profile. The old check read only the ANTHROPIC_API_KEY env var, so a key kept in
+    .env (as the gate's own error message advises) skipped every test: the check that
+    guards GATE_SYSTEM changes silently never ran.
+    """
+    from sift.distill import gate
+
+    if not gate.credentials_available():
+        pytest.skip("live gate calibration needs Anthropic credentials (env, .env or ant profile)")
 
 
 # --- fixtures: material whose verdict we already know the right answer to ---

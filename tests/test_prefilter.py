@@ -78,7 +78,9 @@ def test_meet_the_http_terminator_is_not_a_tool_announcement():
     from sift.distill.prefilter import prefilter_reason
 
     assert prefilter_reason("Can AI do novel security research? Meet the HTTP Terminator") is None
-    assert prefilter_reason("Introducing SignSaboteur: forge signed web tokens") == "tool-announcement"
+    assert (
+        prefilter_reason("Introducing SignSaboteur: forge signed web tokens") == "tool-announcement"
+    )
 
 
 def test_cheat_sheet_updates_still_reach_the_gate():

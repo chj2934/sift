@@ -6,6 +6,6 @@ explain, and only survivors become `technique` notes.
 """
 
 from sift.distill.candidates import Candidate
-from sift.distill.gate import KEEP_REASONS, GateError, Verdict, judge
+from sift.distill.gate import KEEP_REASONS, GateConfigError, GateError, Verdict, judge
 
-__all__ = ["Candidate", "GateError", "KEEP_REASONS", "Verdict", "judge"]
+__all__ = ["Candidate", "GateConfigError", "GateError", "KEEP_REASONS", "Verdict", "judge"]

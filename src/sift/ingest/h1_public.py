@@ -8,6 +8,7 @@ parquet bytes directly with httpx and read them with pyarrow — no `datasets` o
 from __future__ import annotations
 
 import io
+import logging
 from collections.abc import Iterator
 from datetime import date
 
@@ -17,6 +18,8 @@ import pyarrow.parquet as pq
 from sift.ingest.base import clean_text, extract_cwes
 from sift.vault.notes import Note
 from sift.vault.schema import Frontmatter
+
+log = logging.getLogger(__name__)
 
 BASE = "https://huggingface.co/datasets/Hacker0x01/hackerone_disclosed_reports/resolve/main/data"
 FILES = [
@@ -125,20 +128,39 @@ def to_note(row: dict) -> Note | None:
     return Note(meta=meta, body=body)
 
 
-def source(*, limit: int | None = None) -> Iterator[Note]:
+def source(*, limit: int | None = None, refresh: bool = False) -> Iterator[Note]:
+    """Disclosed reports from the dataset. ``limit`` caps the reports considered (the
+    first N usable rows), whether new or already stored.
+
+    A report already in the vault is skipped unless ``refresh``: the dataset is a
+    fixed snapshot, so a re-run had nothing new to say about it - it only rewrote the
+    file (losing anything added in Obsidian) and re-embedded it.
+    """
+    from sift.config import get_settings
+    from sift.ingest.existing import stored_ids
+
+    have = set() if refresh else stored_ids(get_settings().resolved_vault(), prefix="h1-")
     seen = 0
     with httpx.Client(timeout=180, follow_redirects=True) as client:
         for fname in FILES:
             try:
                 table = _download_table(client, fname)
-            except httpx.HTTPError as exc:
-                print(f"  ! h1-public: could not fetch {fname}: {exc}")
+            except (
+                httpx.HTTPError,
+                ValueError,
+                OSError,
+            ) as exc:  # bad parquet: OSError/ArrowInvalid
+                log.warning("h1-public: could not fetch %s: %s", fname, exc)
                 continue
             for row in table.to_pylist():
-                note = to_note(row)
-                if not note:
-                    continue
-                yield note
-                seen += 1
+                rid = row.get("id")
+                if rid and f"h1-{rid}" in have:
+                    seen += 1
+                else:
+                    note = to_note(row)
+                    if not note:
+                        continue
+                    yield note
+                    seen += 1
                 if limit and seen >= limit:
                     return

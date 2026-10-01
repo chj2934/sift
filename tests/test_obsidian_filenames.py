@@ -26,7 +26,7 @@ def test_filename_is_the_title(vault_path):
     assert p.parent.name == "technique"
 
 
-@pytest.mark.parametrize("bad", ['a<b', 'a>b', 'a:b', 'a"b', "a/b", "a\\b", "a|b", "a?b", "a*b"])
+@pytest.mark.parametrize("bad", ["a<b", "a>b", "a:b", 'a"b', "a/b", "a\\b", "a|b", "a?b", "a*b"])
 def test_windows_illegal_characters_are_replaced(bad):
     from sift.vault.notes import title_to_filename
 
@@ -39,7 +39,9 @@ def test_unicode_titles_are_preserved():
     """Orange Tsai's posts are Chinese; slugify would have flattened them to nothing."""
     from sift.vault.notes import title_to_filename
 
-    assert title_to_filename("101 年全國大專院校資安技能金盾獎") == "101 年全國大專院校資安技能金盾獎"
+    assert (
+        title_to_filename("101 年全國大專院校資安技能金盾獎") == "101 年全國大專院校資安技能金盾獎"
+    )
 
 
 def test_windows_reserved_names_are_escaped():

@@ -22,23 +22,33 @@ deeper ``--since`` when the question is historical rather than operational.
 
 The feed is Blogger's JSON API. Post bodies are small and the Stable-updates label is
 ~1,565 posts total, so even a full backfill is only ~11 requests.
+
+``--limit`` caps the release notes written, never the rows the ledger sees: the walk
+always continues to the horizon. If any page of it fails, the ledger is not rewritten
+- its id is fixed, so a partial one would replace the last complete ledger while still
+claiming the full window.
 """
 
 from __future__ import annotations
 
 import html
+import logging
 import re
 import statistics
 from collections.abc import Iterator
 from datetime import date, datetime
+from pathlib import Path
 
 import httpx
 from slugify import slugify
 
 from sift.config import get_settings
-from sift.ingest.base import clean_text, have_note
-from sift.vault.notes import Note
+from sift.ingest.base import clean_text
+from sift.ingest.existing import attach_existing
+from sift.vault.notes import Note, load_note, locate_note
 from sift.vault.schema import Frontmatter
+
+log = logging.getLogger(__name__)
 
 FEED = "https://chromereleases.googleblog.com/feeds/posts/default"
 # Security tables only ever appear on Stable and Extended Stable posts. Filtering by
@@ -108,7 +118,7 @@ def _text(raw: str) -> str:
 
 
 def _split_desc(desc: str) -> tuple[str, str]:
-    """"Use after free in Dawn" -> ("Use after free", "Dawn").
+    """ "Use after free in Dawn" -> ("Use after free", "Dawn").
 
     Chrome's descriptions are uniformly `<bug class> in <component>`, and the split
     has to take the *last* " in " - "Inappropriate implementation in Extensions API"
@@ -190,10 +200,12 @@ def _link(entry: dict) -> str:
     return ""
 
 
-def _release_title(rows: list[dict], version: str, channel: str, when: date | None) -> str:
+def _release_title(version: str, channel: str, when: date | None) -> str:
+    """The row count is not in the title (it is ``extra.cve_count``): a post Google
+    corrects later would otherwise rename the note and break links to it."""
     what = f"Chrome {version}" if version else "Chrome release"
     stamp = when.isoformat() if when else "undated"
-    return f"{what} {channel} — {len(rows)} security fixes, {stamp}"
+    return f"{what} {channel} security fixes, {stamp}"
 
 
 def release_note(entry: dict, rows: list[dict]) -> Note:
@@ -245,12 +257,18 @@ def release_note(entry: dict, rows: list[dict]) -> Note:
     meta = Frontmatter(
         id=f"chrome-release-{slugify(slug_basis, max_length=70)}",
         type="reference",
-        title=_release_title(rows, version, channel, when),
+        title=_release_title(version, channel, when),
         source="chrome-releases",
         url=_link(entry),
         created=when,
         program="Google Chrome",
-        tags=["chromium", "google", "chrome-vrp", "release-notes", channel.lower().replace(" ", "-")],
+        tags=[
+            "chromium",
+            "google",
+            "chrome-vrp",
+            "release-notes",
+            channel.lower().replace(" ", "-"),
+        ],
         cwe=[],
         extra={
             "chrome_version": version,
@@ -338,7 +356,13 @@ def ledger_note(rows: list[dict], *, top: int = 40, horizon: date | None = None)
             f"{', '.join(sevs)} | " + (f"${sum(paid):,.0f} |" if paid else "— |")
         )
 
-    lines += ["", "## Bug classes by fix count", "", "| Bug class | Fixes | Severities seen |", "|---|---|---|"]
+    lines += [
+        "",
+        "## Bug classes by fix count",
+        "",
+        "| Bug class | Fixes | Severities seen |",
+        "|---|---|---|",
+    ]
     for name, count, sevs in _rank(rows, "bug_class", top):
         lines.append(f"| {name} | {count} | {', '.join(sevs)} |")
 
@@ -368,6 +392,24 @@ def _fetch_page(client: httpx.Client, label: str | None, start: int) -> list[dic
     return r.json().get("feed", {}).get("entry", []) or []
 
 
+def _already_stored(vault: Path, note: Note) -> bool:
+    """True when the vault holds this release with the same table.
+
+    A post Google later corrects (a TBD reward that became $5,000, a row added) has
+    the same id but a different body, and is written again - the file is updated in
+    place. Comparing the body, not just the id, is what keeps a corrected table from
+    being frozen out forever.
+    """
+    path = locate_note(vault, note.meta.id, meta=note.meta)
+    if path is None:
+        return False
+    try:
+        stored = load_note(path)
+    except Exception:  # noqa: BLE001 - unreadable: let the writer decide
+        return False
+    return stored.body.strip() == note.body.strip()
+
+
 def source(
     *,
     since: date | None = None,
@@ -383,10 +425,11 @@ def source(
     them and how much are not. Pulling a decade of releases would bury the few months
     that carry information.
 
-    Posts already in the vault are re-parsed but not re-yielded: the fetch is one
-    request per 150 posts either way, and the ledger needs every row in the window to
-    stay honest. Dropping already-seen posts from the aggregate would make the ledger
-    describe only the newest release.
+    Posts already in the vault (same table) are re-parsed but not re-yielded: the
+    fetch is one request per 150 posts either way, and the ledger needs every row in
+    the window to stay honest. Dropping already-seen posts - or, with ``limit``, the
+    posts past it - from the aggregate would make the ledger describe only the newest
+    releases while claiming the whole window.
     """
     settings = get_settings()
     vault = settings.resolved_vault()
@@ -394,6 +437,7 @@ def source(
     all_rows: list[dict] = []
     emitted = 0
     seen_cves: set[str] = set()
+    complete = True  # every page down to the horizon was fetched, for every label
 
     with httpx.Client(timeout=60, follow_redirects=True, headers={"User-Agent": UA}) as client:
         for label in labels or (None,):
@@ -401,16 +445,23 @@ def source(
             while True:
                 try:
                     entries = _fetch_page(client, label, start)
-                except httpx.HTTPError as exc:
-                    print(f"  ! chrome-releases: fetch failed at start-index {start}: {exc}")
+                except (
+                    httpx.HTTPError,
+                    httpx.InvalidURL,
+                    ValueError,
+                ) as exc:  # ValueError: bad JSON
+                    log.warning("chrome-releases: fetch failed at start-index %d: %s", start, exc)
+                    complete = False
                     break
                 if not entries:
                     break
-                stop = False
+                past_horizon = False
                 for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
                     when = _published(entry)
                     if when and when < horizon:
-                        stop = True  # the feed is newest-first, so everything after is older
+                        past_horizon = True  # newest-first: everything after is older
                         break
                     rows = parse_rows((entry.get("content") or {}).get("$t", ""))
                     if not rows:
@@ -419,17 +470,24 @@ def source(
                         if r["cve"] not in seen_cves:
                             seen_cves.add(r["cve"])
                             all_rows.append(r)
-                    note = release_note(entry, rows)
-                    if have_note(vault, note.meta):
-                        continue
-                    yield note
-                    emitted += 1
                     if limit and emitted >= limit:
-                        stop = True
-                        break
-                if stop:
+                        continue  # the limit caps notes written, not rows the ledger sees
+                    note = release_note(entry, rows)
+                    if _already_stored(vault, note):
+                        continue
+                    # The id (version + date) is the release; update its file even
+                    # if the post's URL and our title format both changed.
+                    yield attach_existing(vault, note)
+                    emitted += 1
+                if past_horizon:
                     break
                 start += PAGE_SIZE
 
     if ledger and all_rows:
-        yield ledger_note(all_rows, horizon=horizon)
+        if complete:
+            yield ledger_note(all_rows, horizon=horizon)
+        else:
+            log.warning(
+                "chrome-releases: the feed walk was incomplete, so the ledger was NOT "
+                "rewritten (the last complete one is kept). Re-run to refresh it."
+            )
