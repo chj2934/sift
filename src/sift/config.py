@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import date
 from functools import lru_cache
 from pathlib import Path
 
@@ -49,6 +50,22 @@ class Settings(BaseSettings):
 
     # --- ingestion ---
     research_feeds: str = Field(default="", alias="SIFT_RESEARCH_FEEDS")  # extra RSS/Atom URLs, comma-sep
+    # Local Chromium checkout (the `src` directory). Both Chromium sources read the
+    # tree at whatever revision it is synced to and record that SHA on every note,
+    # so a note is always traceable to the code it described.
+    chromium_src: Path | None = Field(default=None, alias="SIFT_CHROMIUM_SRC")
+    # The reasoning model's training cutoff. This is the default horizon for every
+    # freshness source: material older than this is, by construction, something the
+    # model already knows, and storing it only dilutes ranking (see the novelty gate).
+    # Deliberately a little *before* the true cutoff - knowledge thins out near the
+    # boundary rather than stopping dead, so the last few weeks are worth re-reading.
+    model_cutoff: date = Field(default=date(2026, 4, 1), alias="SIFT_MODEL_CUTOFF")
+
+    # --- novelty gate ---
+    # Only the reasoning model can judge what the reasoning model already knows, so
+    # this must stay a Claude model — a local model would be guessing.
+    gate_model: str = Field(default="claude-opus-5", alias="SIFT_GATE_MODEL")
+    gate_effort: str = Field(default="low", alias="SIFT_GATE_EFFORT")  # low|medium|high|xhigh|max
 
     # --- external APIs ---
     anthropic_api_key: str | None = Field(default=None, alias="ANTHROPIC_API_KEY")

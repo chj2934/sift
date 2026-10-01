@@ -22,8 +22,10 @@ _EPSS_KEEP = 0.88
 # exploitability signal — otherwise the reasoning model already covers it.
 _EPSS_RECENT = 0.60
 _RECENT_SEVERITIES = frozenset({"high", "critical"})
-# Always keep — hand-authored or freshness-sourced.
-_KEEP_TYPES = frozenset({"technique", "target", "finding", "writeup"})
+# Always keep — hand-authored, freshness-sourced, or primary vendor material. A
+# `reference` note is the vendor's own wording pinned to a revision: the model can
+# paraphrase a severity guideline but cannot quote this checkout's copy of it.
+_KEEP_TYPES = frozenset({"technique", "target", "finding", "writeup", "reference"})
 
 
 @dataclass

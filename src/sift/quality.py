@@ -25,6 +25,9 @@ _BASE = {
     "target": 78,
     "finding": 78,
     "writeup": 70,
+    # Primary vendor source. High, but under the authored notes: a severity guideline
+    # settles an argument, it does not tell you where to look.
+    "reference": 74,
 }
 
 _STEP_RE = re.compile(r"steps?\s+to\s+reproduce|^\s*\d+\.\s+\S", re.IGNORECASE | re.MULTILINE)

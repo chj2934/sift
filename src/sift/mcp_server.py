@@ -141,13 +141,130 @@ def remember(
     return {"saved": True, "slug": note.slug, "path": str(path), "chunks_indexed": chunks}
 
 
+IDEA_STATUSES = ("hypothesis", "worked", "failed", "partial")
+
+
 @mcp.tool
-def list_notes(type: str | None = None, program: str | None = None, limit: int = 50) -> dict:
-    """List notes (metadata only), newest first."""
+def capture_idea(
+    idea: str,
+    reasoning: str,
+    target: str | None = None,
+    tags: list[str] | None = None,
+    cwe: list[str] | None = None,
+    links: list[str] | None = None,
+) -> dict:
+    """Record a novel testing idea the moment it forms, before testing it.
+
+    Call this during bug bounty work whenever you form a hypothesis worth trying -
+    especially a specialized or non-obvious one. Ideas start as `hypothesis`; call
+    `resolve_idea` afterwards to record what actually happened.
+
+    Args:
+        idea: the hypothesis in one or two sentences - what to try, and where.
+        reasoning: why this might work here. What observation prompted it.
+        target: program / host / component the idea is about.
+        tags: freeform tags.
+        cwe: list like ["CWE-79"].
+        links: slugs of related notes (techniques, prior findings).
+    """
+    from slugify import slugify
+
+    s = get_settings()
+    now = datetime.now(UTC)
+    base = slugify(idea, max_length=60) or "idea"
+    meta = Frontmatter(
+        id=f"idea-{base}-{now:%Y%m%d%H%M%S}{now.microsecond // 1000:03d}",
+        type="technique",
+        title=idea if len(idea) <= 120 else idea[:117] + "...",
+        source="sift-capture-idea",
+        program=target,
+        tags=sorted({"idea", "status/hypothesis", *(tags or [])}),
+        cwe=cwe or [],
+        links=links or [],
+        ingested=now,
+        # extra is the filterable source of truth; the status/ tag mirrors it so
+        # plain text search finds it too.
+        extra={"status": "hypothesis", "target": target or "", "captured": now.isoformat()},
+    )
+    body = f"**Status:** hypothesis\n\n**Idea:** {idea}\n\n**Why here:** {reasoning}"
+    note = Note(meta=meta, body=body)
+    path = save_note(s.resolved_vault(), note, stamp=False)
+    chunks = index_note(note)
+    return {
+        "saved": True,
+        "slug": note.slug,
+        "status": "hypothesis",
+        "path": str(path),
+        "chunks_indexed": chunks,
+        "hint": "Call resolve_idea with this slug once you know whether it worked.",
+    }
+
+
+@mcp.tool
+def resolve_idea(slug: str, status: str, notes: str) -> dict:
+    """Record the outcome of a previously captured idea.
+
+    Recording `failed` matters as much as `worked` - a documented dead end
+    ("tried JWT alg confusion, RS256 validated properly") stops the next session
+    re-testing it.
+
+    Args:
+        slug: the slug returned by capture_idea.
+        status: worked | failed | partial.
+        notes: what actually happened, and any detail worth keeping.
+    """
+    if status not in IDEA_STATUSES or status == "hypothesis":
+        return {"error": f"status must be one of {IDEA_STATUSES[1:]}"}
+
+    s = get_settings()
+    note = get_note_by_slug(slug)
+    if note is None:
+        return {"error": f"no note with slug {slug!r}"}
+
+    now = datetime.now(UTC)
+    prior = str(note.meta.extra.get("status", "hypothesis"))
+    note.meta.extra["status"] = status
+    note.meta.extra["resolved"] = now.isoformat()
+    note.meta.tags = sorted(
+        {t for t in note.meta.tags if not t.startswith("status/")} | {f"status/{status}"}
+    )
+    note.meta.ingested = now
+    note.body = (
+        note.body.replace(f"**Status:** {prior}", f"**Status:** {status}", 1)
+        + f"\n\n**Outcome ({status}):** {notes}"
+    )
+
+    from sift.index.store import Store
+
+    save_note(s.resolved_vault(), note, stamp=False)
+    store = Store()
+    chunks = index_note(note, store)
+    store.ensure_fts()
+    return {"updated": True, "slug": note.slug, "status": status, "chunks_indexed": chunks}
+
+
+@mcp.tool
+def list_notes(
+    type: str | None = None,
+    program: str | None = None,
+    status: str | None = None,
+    limit: int = 50,
+) -> dict:
+    """List notes (metadata only), newest first.
+
+    Args:
+        type: report | cve | technique | target | finding | writeup.
+        program: bug bounty program / vendor.
+        status: for captured ideas - hypothesis | worked | failed | partial.
+            Use `status="hypothesis"` to find ideas you never followed up on.
+        limit: max rows returned.
+    """
     s = get_settings()
     rows = []
     for note in iter_notes(s.resolved_vault(), note_type=type if type in NOTE_TYPES else None):
         if program and (note.meta.program or "").lower() != program.lower():
+            continue
+        if status and str(note.meta.extra.get("status", "")).lower() != status.lower():
             continue
         rows.append(
             {
@@ -156,6 +273,7 @@ def list_notes(type: str | None = None, program: str | None = None, limit: int =
                 "type": note.meta.type,
                 "program": note.meta.program,
                 "severity": note.meta.severity,
+                "status": note.meta.extra.get("status"),
                 "tags": note.meta.tags,
                 "created": note.meta.created.isoformat() if note.meta.created else None,
             }

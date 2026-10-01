@@ -4,6 +4,7 @@ high-level search entrypoint used by both the CLI and the MCP server.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -111,11 +112,39 @@ class ReindexStats:
     notes: int = 0
     chunks: int = 0
     skipped: int = 0
+    # Notes whose file mtime matched the index, so they were not re-embedded.
+    unchanged: int = 0
     by_type: dict[str, int] = field(default_factory=dict)
 
 
-def reindex(vault: Path | None = None, *, force: bool = False, batch: int = 512) -> ReindexStats:
-    """Rebuild the index from the vault, embedding chunks in large batches."""
+def count_notes(vault: Path | None = None) -> int:
+    """How many notes `iter_notes` will yield. Used to size a progress bar."""
+    from sift.vault.schema import NOTE_TYPES
+
+    vault = vault or get_settings().resolved_vault()
+    total = 0
+    for note_type in NOTE_TYPES:
+        d = vault / note_type
+        if not d.is_dir():
+            continue
+        total += sum(
+            1 for p in d.glob("*.md") if not p.name.startswith("_") and p.name != "README.md"
+        )
+    return total
+
+
+def reindex(
+    vault: Path | None = None,
+    *,
+    force: bool = False,
+    batch: int = 512,
+    on_progress: Callable[[int], None] | None = None,
+) -> ReindexStats:
+    """Rebuild the index from the vault, embedding chunks in large batches.
+
+    `on_progress` receives the number of notes processed so far, after each flush.
+    Kept as a callback so this module stays free of any UI dependency.
+    """
     s = get_settings()
     vault = vault or s.resolved_vault()
     store = Store()
@@ -124,6 +153,11 @@ def reindex(vault: Path | None = None, *, force: bool = False, batch: int = 512)
 
     stats = ReindexStats()
     embedder = _embed.get_embedder()
+
+    # Without this, adding one note re-embedded all 9,000+ — minutes of GPU work to
+    # index a single file. Chunk rows already carry the source file's mtime, so an
+    # incremental pass can skip everything untouched. `--force` still rebuilds all.
+    indexed_mtimes: dict[str, float] = {} if force else store.note_mtimes()
 
     # (note, [chunks]) buffered until we have `batch` chunks, then embed+write together.
     buf: list[tuple[Note, list]] = []
@@ -148,6 +182,22 @@ def reindex(vault: Path | None = None, *, force: bool = False, batch: int = 512)
         buf, buf_chunks = [], 0
 
     for note in iter_notes(vault):
+        if indexed_mtimes and note.path is not None:
+            try:
+                on_disk = note.path.stat().st_mtime
+            except OSError:
+                on_disk = 0.0
+            was = indexed_mtimes.get(note.meta.id)
+            # Float equality is right here: both sides are the same stat value
+            # round-tripped through the store, not a computed quantity.
+            if was is not None and on_disk and was == on_disk:
+                stats.unchanged += 1
+                # Skipped notes still count as progress, or the bar sits at 0% while
+                # racing through 9,000 unchanged files.
+                if on_progress and stats.unchanged % 250 == 0:
+                    on_progress(stats.notes + stats.unchanged)
+                continue
+
         chunks = chunk_markdown(note.body)
         if not chunks:
             stats.skipped += 1
@@ -159,11 +209,15 @@ def reindex(vault: Path | None = None, *, force: bool = False, batch: int = 512)
         stats.by_type[note.meta.type] = stats.by_type.get(note.meta.type, 0) + 1
         if buf_chunks >= batch:
             flush()
-            if stats.notes - last_report >= 2000:
+            if on_progress:
+                on_progress(stats.notes + stats.unchanged)
+            elif stats.notes - last_report >= 2000:
                 last_report = stats.notes
                 print(f"  .. {stats.notes} notes indexed")
 
     flush()
+    if on_progress:
+        on_progress(stats.notes)
     store.ensure_fts()
     return stats
 

@@ -25,11 +25,13 @@ machine except the ingest fetches (public datasets + your own HackerOne API call
  sources                       vault (markdown)              index & retrieval
  ───────                       ────────────────              ─────────────────
  CISA KEV        ┐                                          ┌ dense vector (BGE)
- NVD CVEs        │   normalize   vault/cve/*.md    chunk +   │ BM25 keyword (FTS)
- EPSS scores     ├──────────────▶ vault/report/*.md ────────▶├ RRF fusion
- HackerOne (pub) │               vault/technique/*.md  embed │ + cross-encoder rerank
- HackerOne (you) │               vault/target/*.md          │ + [[wikilink]] graph walk
- your notes      ┘               [[wikilinks]] between them  └▶ cited results
+ NVD CVEs        │              vault/cve/*.md              │ BM25 keyword (FTS)
+ EPSS scores     │   normalize  vault/report/*.md           │ RRF fusion
+ HackerOne (pub) ├─────────────▶ vault/technique/*.md ─────▶├ cross-encoder rerank
+ HackerOne (you) │              vault/target/*.md    embed  │ [[wikilink]] graph walk
+ Chromium src    │              vault/reference/*.md        │
+ Chrome releases │                                          └▶ cited results
+ your notes      ┘              [[wikilinks]] between them
                                           │                          │
                                           └──────────── sift CLI  /  MCP tools ──┘
                                                         (search_memory, remember, …)
@@ -77,6 +79,27 @@ uv run sift status
 
 First run downloads the embedding model (bge-base-en-v1.5, ~0.2 GB).
 
+### Target-specific: Google / Chromium
+
+```bash
+uv run sift ingest google                 # all three of the below, one horizon
+uv run sift ingest chromium-docs          # in-tree security docs the vendor CHANGED since the cutoff
+uv run sift ingest chromium-fixes         # security-fix commits — the mechanism corpus
+uv run sift ingest chrome-releases        # release security tables + the VRP reward ledger
+```
+
+The first two read a local Chromium checkout (`SIFT_CHROMIUM_SRC`) and stamp its HEAD
+sha on every note, so a quote stays traceable to the revision it shipped with.
+
+All three default their horizon to **`SIFT_MODEL_CUTOFF`**, because this corpus is
+unusually well represented in training data: `rule-of-2.md` has read the same way for
+years, and storing it back costs retrieval tokens to tell the reasoning model
+something it can already recite. What is *not* training data is the change — a
+paragraph added to `severity-guidelines.md` in July 2026 moves what is filable, and a
+fix commit from last week names an invariant that was not being enforced. `sift ingest
+chromium-docs --all` overrides this when you want the stable policy text verbatim,
+with line anchors, to quote at triage.
+
 ## Search
 
 ```bash
@@ -105,6 +128,8 @@ bypasses are in my memory?"* or *"remember this technique: …"*.
 | `SIFT_EMBED_MODEL` | `BAAI/bge-base-en-v1.5` | embedding model (`bge-large` = better, GPU-recommended) |
 | `SIFT_EMBED_DEVICE` | `auto` | `auto` / `cuda` / `cpu` |
 | `SIFT_RERANK` | `false` | enable cross-encoder reranking |
+| `SIFT_MODEL_CUTOFF` | `2026-04-01` | default horizon for every freshness source — older material is what the model already knows |
+| `SIFT_CHROMIUM_SRC` | – | local Chromium `src` checkout, for `ingest chromium-docs` / `chromium-fixes` |
 | `H1_API_USERNAME` / `H1_API_TOKEN` | – | HackerOne API ([token](https://hackerone.com/settings/api_token/edit)) |
 | `NVD_API_KEY` | – | raises NVD rate limit ([request](https://nvd.nist.gov/developers/request-an-api-key)) |
 

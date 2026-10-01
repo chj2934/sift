@@ -1,0 +1,242 @@
+[
+  {
+    "url": "https://portswigger.net/research/a-hacking-hat-trick-previewing-three-portswigger-research-publications-coming-to-def-con-amp-black-hat-usa",
+    "decision": "drop",
+    "reason": "already-known",
+    "title": ""
+  },
+  {
+    "url": "https://portswigger.net/research/how-to-distinguish-http-pipelining-from-request-smuggling",
+    "decision": "drop",
+    "reason": "already-known",
+    "title": ""
+  },
+  {
+    "url": "https://portswigger.net/research/bypassing-character-blocklists-with-unicode-overflows",
+    "decision": "keep",
+    "reason": "obscure-variant",
+    "title": "Unicode codepoint overflow to bypass character blocklists"
+  },
+  {
+    "url": "https://portswigger.net/research/bypassing-wafs-with-the-phantom-version-cookie",
+    "decision": "keep",
+    "reason": "operational-detail",
+    "title": "$Version legacy cookie parsing to bypass WAFs"
+  },
+  {
+    "url": "https://portswigger.net/research/can-ai-do-novel-security-research",
+    "decision": "keep",
+    "reason": "post-cutoff",
+    "title": "HTTP Terminator: post-cutoff desync triggers and gadgets"
+  },
+  {
+    "url": "https://portswigger.net/research/concealing-payloads-in-url-credentials",
+    "decision": "keep",
+    "reason": "obscure-variant",
+    "title": "Hiding XSS payloads in URL credentials"
+  },
+  {
+    "url": "https://portswigger.net/research/cookie-chaos-how-to-bypass-host-and-secure-cookie-prefixes",
+    "decision": "keep",
+    "reason": "obscure-variant",
+    "title": "Bypassing __Host- and __Secure- cookie prefixes"
+  },
+  {
+    "url": "https://portswigger.net/research/crlf-powered-desync-attacks",
+    "decision": "keep",
+    "reason": "post-cutoff",
+    "title": "CRLF-powered desync: header injection to desync worm"
+  },
+  {
+    "url": "https://portswigger.net/research/css-the-bomb-inside-your-inbox",
+    "decision": "keep",
+    "reason": "post-cutoff",
+    "title": "Webmail CSS/HTML sanitiser bypasses"
+  },
+  {
+    "url": "https://portswigger.net/research/document-my-pentest",
+    "decision": "drop",
+    "reason": "already-known",
+    "title": ""
+  },
+  {
+    "url": "https://portswigger.net/research/drag-and-pwnd-leverage-ascii-characters-to-exploit-vs-code",
+    "decision": "keep",
+    "reason": "obscure-variant",
+    "title": "ASCII control characters as command injection via node-pty"
+  },
+  {
+    "url": "https://portswigger.net/research/fickle-pdfs-exploiting-browser-rendering-discrepancies",
+    "decision": "keep",
+    "reason": "obscure-variant",
+    "title": "Hybrid PDFs that render different values per viewer"
+  },
+  {
+    "url": "https://portswigger.net/research/finding-that-one-weird-endpoint-with-bambdas",
+    "decision": "drop",
+    "reason": "already-known",
+    "title": ""
+  },
+  {
+    "url": "https://portswigger.net/research/gotta-cache-em-all",
+    "decision": "keep",
+    "reason": "obscure-variant",
+    "title": "Arbitrary web cache deception and poisoning via URL parser discrepancies"
+  },
+  {
+    "url": "https://portswigger.net/research/hiding-payloads-in-java-source-code-strings",
+    "decision": "drop",
+    "reason": "already-known",
+    "title": ""
+  },
+  {
+    "url": "https://portswigger.net/research/http1-must-die",
+    "decision": "keep",
+    "reason": "operational-detail",
+    "title": "0.CL and Expect-based desync attacks"
+  },
+  {
+    "url": "https://portswigger.net/research/inline-style-exfiltration",
+    "decision": "keep",
+    "reason": "obscure-variant",
+    "title": "Exfiltrating attribute data from inline styles with CSS if()"
+  },
+  {
+    "url": "https://portswigger.net/research/introducing-http-anomaly-rank",
+    "decision": "drop",
+    "reason": "already-known",
+    "title": ""
+  },
+  {
+    "url": "https://portswigger.net/research/introducing-signsaboteur-forge-signed-web-tokens-with-ease",
+    "decision": "drop",
+    "reason": "already-known",
+    "title": ""
+  },
+  {
+    "url": "https://portswigger.net/research/introducing-the-url-validation-bypass-cheat-sheet",
+    "decision": "drop",
+    "reason": "already-known",
+    "title": ""
+  },
+  {
+    "url": "https://portswigger.net/research/listen-to-the-whispers-web-timing-attacks-that-actually-work",
+    "decision": "keep",
+    "reason": "obscure-variant",
+    "title": "Practical web timing attacks on live targets"
+  },
+  {
+    "url": "https://portswigger.net/research/trace-desync-attack",
+    "decision": "keep",
+    "reason": "obscure-variant",
+    "title": "TRACE as a reflection gadget for unexploitable desyncs"
+  },
+  {
+    "url": "https://portswigger.net/research/new-crazy-payloads-in-the-url-validation-bypass-cheat-sheet",
+    "decision": "keep",
+    "reason": "operational-detail",
+    "title": "URL and CORS validation bypass payloads (2024 additions)"
+  },
+  {
+    "url": "https://portswigger.net/research/new-exotic-events-in-the-xss-cheat-sheet",
+    "decision": "keep",
+    "reason": "operational-detail",
+    "title": "Exotic event handlers for XSS blocklist bypass"
+  },
+  {
+    "url": "https://portswigger.net/research/adjusting-your-http-perspective-with-bambdas",
+    "decision": "drop",
+    "reason": "already-known",
+    "title": ""
+  },
+  {
+    "url": "https://portswigger.net/research/repeater-strike-manual-testing-amplified",
+    "decision": "drop",
+    "reason": "already-known",
+    "title": ""
+  },
+  {
+    "url": "https://portswigger.net/research/saml-roulette-the-hacker-always-wins",
+    "decision": "keep",
+    "reason": "obscure-variant",
+    "title": "SAML round-trip attacks via XML parser mutation"
+  },
+  {
+    "url": "https://portswigger.net/research/shadow-repeater-ai-enhanced-manual-testing",
+    "decision": "drop",
+    "reason": "already-known",
+    "title": ""
+  },
+  {
+    "url": "https://portswigger.net/research/splitting-the-email-atom",
+    "decision": "keep",
+    "reason": "obscure-variant",
+    "title": "Email parser discrepancies for access control bypass"
+  },
+  {
+    "url": "https://portswigger.net/research/stealing-httponly-cookies-with-the-cookie-sandwich-technique",
+    "decision": "keep",
+    "reason": "obscure-variant",
+    "title": "Cookie sandwich: reading HttpOnly cookies via quoted-value parsing"
+  },
+  {
+    "url": "https://portswigger.net/research/the-fragile-lock",
+    "decision": "keep",
+    "reason": "obscure-variant",
+    "title": "Void Canonicalization and modern SAML signature bypasses"
+  },
+  {
+    "url": "https://portswigger.net/research/top-10-web-hacking-techniques-of-2023-nominations-open",
+    "decision": "drop",
+    "reason": "already-known",
+    "title": ""
+  },
+  {
+    "url": "https://portswigger.net/research/top-10-web-hacking-techniques-of-2023",
+    "decision": "drop",
+    "reason": "already-known",
+    "title": ""
+  },
+  {
+    "url": "https://portswigger.net/research/top-10-web-hacking-techniques-of-2024-nominations-open",
+    "decision": "drop",
+    "reason": "already-known",
+    "title": ""
+  },
+  {
+    "url": "https://portswigger.net/research/top-10-web-hacking-techniques-of-2024",
+    "decision": "drop",
+    "reason": "already-known",
+    "title": ""
+  },
+  {
+    "url": "https://portswigger.net/research/top-10-web-hacking-techniques-of-2025-nominations-open",
+    "decision": "drop",
+    "reason": "already-known",
+    "title": ""
+  },
+  {
+    "url": "https://portswigger.net/research/top-10-web-hacking-techniques-of-2025",
+    "decision": "drop",
+    "reason": "already-known",
+    "title": ""
+  },
+  {
+    "url": "https://portswigger.net/research/using-form-hijacking-to-bypass-csp",
+    "decision": "drop",
+    "reason": "already-known",
+    "title": ""
+  },
+  {
+    "url": "https://portswigger.net/research/websocket-turbo-intruder-unearthing-the-websocket-goldmine",
+    "decision": "drop",
+    "reason": "already-known",
+    "title": ""
+  },
+  {
+    "url": "https://portswigger.net/research/whats-in-a-tag-name-javascript-apparently",
+    "decision": "keep",
+    "reason": "post-cutoff",
+    "title": "Tag names as JavaScript: localName XSS and WAF bypass"
+  }
+]

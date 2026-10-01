@@ -17,7 +17,7 @@ def test_frontmatter_roundtrip(vault_path):
     path = save_note(vault_path, note)
 
     assert path.exists()
-    assert path.name == "cve-2024-1234.md"
+    assert path.name == "Test CVE.md"  # filename is the title, for Obsidian
 
     reloaded = load_note(path)
     assert reloaded.meta.cwe == ["CWE-79", "CWE-89"]

@@ -1,11 +1,14 @@
 # --- Sensitive / local data: NEVER commit ---
+# Anchored with a leading slash on purpose: an unanchored `vault/` matches at ANY
+# depth, so it also ignored `src/sift/vault/` and kept that whole package — notes.py
+# and schema.py — out of the repo. Same reasoning for data/ and models/.
 .env
-vault/
-!vault/.gitkeep
+/vault/
+!/vault/.gitkeep
 *.lance
 .lancedb/
-data/
-models/
+/data/
+/models/
 
 # --- Python ---
 .venv/

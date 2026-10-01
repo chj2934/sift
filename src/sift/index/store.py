@@ -194,6 +194,27 @@ class Store:
             return 0
 
     # ---- writes -----------------------------------------------------------
+    def note_mtimes(self) -> dict[str, float]:
+        """note_id -> indexed mtime, for skipping unchanged notes on reindex.
+
+        One scan of two columns; cheap next to re-embedding every note.
+        """
+        try:
+            tbl = self.table()
+        except Exception:  # noqa: BLE001 - no table yet is a normal cold start
+            return {}
+        try:
+            rows = tbl.search().select(["note_id", "mtime"]).limit(0).to_list()
+        except Exception:  # noqa: BLE001 - older table without the column
+            return {}
+        out: dict[str, float] = {}
+        for r in rows:
+            nid = r.get("note_id")
+            if nid is not None:
+                # Chunks of a note share its mtime; last write wins.
+                out[nid] = float(r.get("mtime") or 0.0)
+        return out
+
     def delete_note(self, note_id: str) -> None:
         safe = note_id.replace("'", "''")
         with contextlib.suppress(Exception):
